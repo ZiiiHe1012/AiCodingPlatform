@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.vite/
+*.log
+*.tsbuildinfo
+reference/
+artifacts/
+.env.local
+
+releases/
