@@ -29,6 +29,9 @@ def init_db(conn):
       revision INTEGER NOT NULL,expires INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS login_limits(name TEXT PRIMARY KEY,count INTEGER NOT NULL,since INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS audits(id TEXT PRIMARY KEY,action TEXT,reason TEXT,time TEXT,actor TEXT,user_id TEXT);
+    CREATE TABLE IF NOT EXISTS access_keys(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),
+      name TEXT,hash TEXT UNIQUE,prefix TEXT,scopes TEXT,expires TEXT,revoked INTEGER DEFAULT 0,
+      window INTEGER DEFAULT 0,calls INTEGER DEFAULT 0);
     """)
     conn.execute("BEGIN IMMEDIATE")
     for user_id, (username, password, nickname, role) in BUILTIN_ACCOUNTS.items():
@@ -51,6 +54,7 @@ def init_db(conn):
         elif row["username"] != username or row["role"] != role or not row["enabled"]:
             conn.execute("""UPDATE users SET username=?,role=?,enabled=1,revision=revision+1
                             WHERE id=?""", (username, role, user_id))
+            conn.execute("UPDATE access_keys SET revoked=1 WHERE user_id=?", (user_id,))
         else:
             continue
         conn.execute("DELETE FROM login_limits WHERE name=?", (username,))
@@ -74,6 +78,8 @@ def profile(row):
 
 def authenticate():
     g.user = None
+    if request.headers.get("Authorization"):
+        fail(401, "请使用登录会话")
     if request.cookies.get(COOKIE):
         g.user = db().execute("""SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id
            WHERE token=? AND expires>? AND s.revision=u.revision AND u.enabled=1""",
@@ -170,6 +176,7 @@ def me():
 def replace_password(user_id, new_password):
     db().execute("UPDATE users SET password_hash=?,revision=revision+1 WHERE id=?",
                  (generate_password_hash(new_password), user_id))
+    db().execute("UPDATE access_keys SET revoked=1 WHERE user_id=? AND revoked=0", (user_id,))
 
 
 @bp.post("/users/me/password")
@@ -181,7 +188,7 @@ def password():
     if uid() in BUILTIN_ACCOUNTS and any(data["new_password"] == item[1] for item in BUILTIN_ACCOUNTS.values()):
         fail(422, "请为课堂账号设置自选密码，避免使用公开的演示密码")
     replace_password(uid(), data["new_password"])
-    audit("修改密码", "旧会话已失效")
+    audit("修改密码", "旧会话和 API 凭证已失效")
     return logout()
 
 
