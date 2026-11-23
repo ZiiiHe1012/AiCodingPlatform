@@ -13,7 +13,7 @@ from flask import Flask, g, jsonify, redirect, request, send_from_directory, url
 from werkzeug.exceptions import HTTPException
 from werkzeug.serving import run_simple
 
-from . import auth, catalog
+from . import auth, catalog, frontend_bridge
 from .core import db, fail, ident, ok
 
 
@@ -76,6 +76,7 @@ def create_app(config=None):
     for module in (auth, catalog):
         app.register_blueprint(module.bp, url_prefix="/api/v1")
 
+    app.register_blueprint(frontend_bridge.bp)
 
     @app.before_request
     def authorize():

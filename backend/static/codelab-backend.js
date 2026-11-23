@@ -1,0 +1,69 @@
+// Same-origin transport for the bundled Vue client. Demo accounts keep their original methods.
+export function connectBackend(api, state, ApiError) {
+  const original = { ...api };
+  let profile = null;
+  let localState;
+  const copy = value => JSON.parse(JSON.stringify(value));
+  const keys = ['problems', 'exams', 'classes', 'submissions', 'banks', 'users', 'keys', 'audits', 'aiUsage'];
+  function clearLocalSession() {
+    localStorage.removeItem('codelab-session-v1');
+    sessionStorage.removeItem('codelab-session-v1');
+  }
+  async function request(path, method='GET', data, headers={}) {
+    const res = await fetch('/api/v1' + path, {
+      method, credentials:'same-origin', cache:'no-store',
+      headers:{'Content-Type':'application/json', ...(profile && method !== 'GET' ? {'X-CodeLab-User':profile.id} : {}), ...headers},
+      body:data === undefined ? undefined : JSON.stringify(data),
+    });
+    const reply = await res.json();
+    if (!res.ok) throw new ApiError(res.status, reply.message, reply.request_id);
+    return reply.data;
+  }
+  function leave() {
+    if (localState) Object.assign(state,localState);
+    localState = undefined;
+    profile = null;
+  }
+  async function authenticate(operation, data) {
+    const user = await request('/auth/'+operation, 'POST', data);
+    clearLocalSession();
+    await load(user);
+    return user;
+  }
+  async function load(user) {
+    if (!localState) localState = Object.fromEntries(keys.map(k=>[k,copy(state[k])]));
+    profile = user;
+    Object.assign(state,{problems:[],exams:[],submissions:[],classes:[],banks:[],users:[],keys:[],audits:[],aiUsage:{}});
+  }
+  async function route(to, localUser) {
+    let user;
+    try { user = await request('/users/me'); }
+    catch (error) {
+      if (error.status !== 401) throw error;
+      if (profile) leave();
+      clearLocalSession();
+      return null;
+    }
+    if (!profile || profile.id !== user.id || profile.role !== user.role) {
+      if (profile) leave();
+      clearLocalSession();
+      await load(user);
+    } else {
+      profile = user;
+    }
+    return profile;
+  }
+  const remote={
+    login:(username,password,remember)=>authenticate('login',{username,password,remember}),
+    register:(username,password,nickname,remember)=>authenticate('register',{username,password,nickname,remember}),
+  };
+  for(const [name,handler] of Object.entries(remote)) {
+    api[name]=(...args)=>profile||name==='login'||name==='register'?handler(...args):original[name](...args);
+  }
+  return {
+    route, get live(){return !!profile;},
+    async logout(){if(profile){await request('/auth/logout','POST',{});leave();}},
+    async changePassword(old_password,new_password){await request('/users/me/password','POST',{old_password,new_password});leave();},
+    async updateProfile(data){profile=await request('/users/me','PATCH',data);return profile;}
+  };
+}

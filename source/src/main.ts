@@ -6,6 +6,10 @@ import "./style.css";
 import "./personal.css";
 import App from "./App.vue";
 import { router } from "./router";
+import { connectPlatform } from "./services/platform";
+import { api, ApiError } from "./services/api";
+import { state } from "./store";
+
 // Classroom LAN hosts can provide secure random bytes over HTTP even when randomUUID is unavailable.
 if (typeof crypto.randomUUID !== "function") {
   Object.defineProperty(crypto, "randomUUID", { value: () => {
@@ -16,4 +20,10 @@ if (typeof crypto.randomUUID !== "function") {
     return [hex.slice(0,8),hex.slice(8,12),hex.slice(12,16),hex.slice(16,20),hex.slice(20)].join("-");
   }});
 }
-createApp(App).use(router).use(ElementPlus, { locale: zhCn }).mount("#app");
+async function start() {
+  if (import.meta.env.VITE_USE_MOCK !== "true") {
+    await connectPlatform(api, state, ApiError);
+  }
+  createApp(App).use(router).use(ElementPlus, { locale: zhCn }).mount("#app");
+}
+void start();

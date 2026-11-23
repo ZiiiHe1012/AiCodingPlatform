@@ -3,7 +3,7 @@ import { state, userId, audit } from "../store";
 import { gradeRows } from "./gradeStore";
 import { sameFiles } from "../project";
 import { signIn, registerAccount, type Profile } from "./accounts";
-export const isMock = import.meta.env.VITE_USE_MOCK !== "false";
+export const isMock = import.meta.env.VITE_USE_MOCK === "true" || import.meta.env.MODE === "test";
 export const baseURL = import.meta.env.VITE_API_BASE_URL || "/api/v1";
 export class ApiError extends Error {
   constructor(

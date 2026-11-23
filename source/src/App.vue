@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { ElMessage } from "element-plus";
 import Icon from "./components/Icon.vue";
-import { state, resetDemo, applyAccount } from "./store";
+import { state, applyAccount } from "./store";
 import { isMock } from "./services/api";
 import { enterDemo } from "./services/accounts";
 import ProfileAvatar from "./components/ProfileAvatar.vue";
@@ -13,7 +13,6 @@ const route = useRoute(),
   mobileNavOpen = ref(false),
   sidebarCollapsed = ref(localStorage.getItem("codelab-sidebar-collapsed") === "1"),
   viewportWidth = ref(window.innerWidth),
-  help = ref(false),
   notifications = ref(false),
   search = ref("");
 const drawerMode = computed(() => viewportWidth.value <= 760 || (route.path.startsWith("/workspace") && viewportWidth.value <= 1024));
@@ -26,41 +25,20 @@ function toggleNavigation() {
   }
 }
 const updateViewport = () => { viewportWidth.value = window.innerWidth; };
-const nav = [
+const nav: {label:string;items:{path:string;text:string;icon:string;badge?:string}[]}[] = [
   {
     label: "工作空间",
     items: [
       { path: "/", text: "个人主页", icon: "dashboard" },
-      { path: "/problems", text: "探索题库", icon: "book", badge: "12" },
-      { path: "/exams", text: "考试中心", icon: "calendar" },
-      { path: "/reports", text: "学习记录", icon: "chart" },
-      { path: "/leaderboard", text: "排行榜", icon: "trophy" },
     ],
   },
   {
     label: "我的资源",
     items: [
-      { path: "/classes", text: "我的班级", icon: "users" },
-      { path: "/banks", text: "我的题库", icon: "folder" },
-      { path: "/mock", text: "个人模拟", icon: "code" },
-      { path: "/developer", text: "开放 API", icon: "key" },
     ],
   },
 ];
-const management = computed(() =>
-  state.role === "student"
-    ? []
-    : [
-        { path: "/exams/new", text: "组卷与发布", icon: "list" },
-        { path: "/grades", text: "成绩与复核", icon: "graduation" },
-        ...(state.role === "admin"
-          ? [
-              { path: "/admin", text: "用户与权限", icon: "shield" },
-              { path: "/monitor", text: "运行监控", icon: "activity" },
-            ]
-          : []),
-      ],
-);
+const management = computed<{path:string;text:string;icon:string}[]>(() => []);
 const roleName = computed(
   () => ({ student: "学生", teacher: "教师", admin: "管理员" })[state.role],
 );
@@ -73,15 +51,6 @@ function roleChange(value: Role) {
 function globalSearch() {
   router.push({ path: "/problems", query: { q: search.value } });
   search.value = "";
-}
-async function reset() {
-  await ElMessageBox.confirm(
-    "将清除本浏览器的演示操作和草稿，恢复初始展示数据。",
-    "重置演示",
-    { type: "warning" },
-  )
-    .then(resetDemo)
-    .catch(() => {});
 }
 const storageError = () =>
   ElMessage.error("浏览器存储空间不足，请下载草稿后清理演示数据");
@@ -112,7 +81,7 @@ onBeforeUnmount(() => {
         ><span>CodeLab</span><span class="brand-dot"
       /></RouterLink>
       <nav>
-        <div v-for="group in nav" :key="group.label" class="nav-group">
+        <div v-for="group in nav.filter(g => g.items.length)" :key="group.label" class="nav-group">
           <span class="nav-label">{{ group.label }}</span
           ><RouterLink
             v-for="item in group.items"
@@ -146,9 +115,6 @@ onBeforeUnmount(() => {
         </div>
       </nav>
       <div class="sidebar-bottom">
-        <button class="nav-link guide-button" @click="help = true">
-          <Icon name="help" /><span>使用指南</span>
-        </button>
         <RouterLink to="/settings" class="profile-link" @click="mobileNavOpen = false"
           ><ProfileAvatar
             :name="displayName"
@@ -181,7 +147,7 @@ onBeforeUnmount(() => {
           }}</b>
         </div>
         <div class="topbar-actions">
-          <form class="global-search" @submit.prevent="globalSearch">
+          <form v-if="false" class="global-search" @submit.prevent="globalSearch">
             <Icon name="search" :size="16" /><input
               v-model="search"
               aria-label="全局搜索题目"
@@ -200,7 +166,7 @@ onBeforeUnmount(() => {
               label="管理员视角"
               value="admin" /></el-select
           ><button
-            class="icon-btn notification-btn"
+            v-if="false" class="icon-btn notification-btn"
             aria-label="查看通知"
             @click="notifications = true"
           >
@@ -222,29 +188,6 @@ onBeforeUnmount(() => {
       </main>
     </div>
   </div>
-  <el-dialog v-model="help" title="开始使用 CodeLab" width="560px">
-    <div class="guide-steps">
-      <p>
-        <b>01　个人练习</b><br />探索题库 → 点击题目 → 编辑项目文件 → 检查项目 →
-        提交 → 六维报告。
-      </p>
-      <p>
-        <b>02　课堂考试</b><br />教师创建考试 → 学生考前确认 → 限时作答与交卷 →
-        教师复核和发布。
-      </p>
-      <p>
-        <b>03　内容与平台</b
-        ><br />建立私有题库、配置模拟考试；管理员可维护权限和查看模拟队列。
-      </p>
-    </div>
-    <template #footer
-      ><el-button v-if="state.profile?.demo" @click="reset"
-        >重置演示数据</el-button
-      ><el-button type="primary" @click="help = false"
-        >开始探索</el-button
-      ></template
-    ></el-dialog
-  >
   <el-drawer v-model="notifications" title="消息通知" size="380px"
     ><div class="notification-item">
       <span class="icon-tile"><Icon name="calendar" /></span>
