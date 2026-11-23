@@ -3,15 +3,14 @@ import { ref, computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { state, applyAccount } from "../store";
+import { platform } from "../services/platform";
 import { api } from "../services/api";
 import {
-  enterDemo,
   signOut,
   updateProfile,
   changeLocalPassword,
   avatarColors,
 } from "../services/accounts";
-import type { Role } from "../types";
 import Icon from "../components/Icon.vue";
 import LineField from "../components/LineField.vue";
 import ProfileAvatar from "../components/ProfileAvatar.vue";
@@ -84,15 +83,12 @@ async function auth() {
     busy.value = false;
   }
 }
-function demo(role: Role) {
-  applyAccount(enterDemo(role));
-  router.replace(destination());
-}
 async function saveProfile() {
   profileBusy.value = true;
   try {
+    const save = platform?.live ? platform.updateProfile : updateProfile;
     applyAccount(
-      updateProfile({
+      await save({
         nickname: nickname.value,
         bio: bio.value,
         className: className.value,
@@ -115,7 +111,8 @@ async function changePassword() {
   }
   passwordBusy.value = true;
   try {
-    await changeLocalPassword(oldPassword.value, newPassword.value);
+    if (platform?.live) await platform.changePassword(oldPassword.value, newPassword.value);
+    else await changeLocalPassword(oldPassword.value, newPassword.value);
     applyAccount(null);
     oldPassword.value = newPassword.value = newConfirmation.value = "";
     await router.replace("/login");
@@ -126,7 +123,8 @@ async function changePassword() {
     passwordBusy.value = false;
   }
 }
-function logout(create = false) {
+async function logout(create = false) {
+  await platform?.logout();
   signOut();
   applyAccount(null);
   router.replace(create ? "/login?mode=register" : "/login");
@@ -222,18 +220,6 @@ function logout(create = false) {
             }}<Icon name="arrow" :size="17"
           /></el-button>
         </form>
-        <div class="account-demo">
-          <span>体验账户</span>
-          <div>
-            <button @click="demo('student')">
-              学生<Icon name="arrow" :size="14" /></button
-            ><button @click="demo('teacher')">
-              教师<Icon name="arrow" :size="14" /></button
-            ><button @click="demo('admin')">
-              管理员<Icon name="arrow" :size="14" />
-            </button>
-          </div>
-        </div>
       </div>
     </section>
   </div>

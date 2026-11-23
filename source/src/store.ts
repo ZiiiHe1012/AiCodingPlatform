@@ -1,3 +1,4 @@
+import { platform } from "./services/platform";
 import { reactive, watch } from "vue";
 import { currentProfile, type Profile } from "./services/accounts";
 import { upgradeProblem } from "./project";
@@ -143,6 +144,7 @@ localStorage.setItem("codelab-demo-v1", JSON.stringify(state));
 watch(
   state,
   () => {
+    if (platform?.live) return;
     try {
       localStorage.setItem("codelab-demo-v1", JSON.stringify(state));
     } catch {
