@@ -41,6 +41,10 @@ def init_db(conn):
           status TEXT NOT NULL, metadata TEXT NOT NULL, private_tests TEXT NOT NULL DEFAULT '{}',
           reference_files TEXT NOT NULL DEFAULT '{}', PRIMARY KEY(problem_id,version), UNIQUE(problem_id,seq));
         CREATE INDEX IF NOT EXISTS versions_by_status ON problem_versions(status,problem_id,seq);
+        CREATE TABLE IF NOT EXISTS project_imports (
+          id TEXT PRIMARY KEY, bank_id TEXT NOT NULL REFERENCES banks(id),
+          owner_id TEXT NOT NULL REFERENCES users(id), filename TEXT NOT NULL, contents BLOB,
+          validation_id TEXT UNIQUE, result TEXT, created_project TEXT REFERENCES projects(id));
     """)
     conn.execute("INSERT OR IGNORE INTO banks(id,name) VALUES(?,?)", (BUILTIN, "内置题库"))
     for p in json.loads(Path(__file__).with_name("catalog_seed.json").read_text(encoding="utf-8")):
@@ -314,9 +318,8 @@ def create_project():
     bank = owned_bank(default_bank() if not bank_ref or bank_ref == DEFAULT_BANK else bank_ref)
     data = public_metadata(raw)
     text_field(data.get("title"), "题名", 120)
-    if "author_materials" in raw:
-        fail(422, "此版本仅接收公开题目文件")
-    project = store_project(bank, data)
+    private, reference = packages.author_materials(raw)
+    project = store_project(bank, data, private, reference)
     audit("创建工程任务", project)
     db().commit()
     return ok(problem_dict(get_project_row(project, manage=True)), 201)
@@ -332,12 +335,11 @@ def new_version(project):
         fail(409, "题目已有更新版本，请刷新")
     data = public_metadata({**json.loads(previous["metadata"]), **raw})
     text_field(data.get("title"), "题名", 120)
-    if "author_materials" in raw:
-        fail(422, "此版本仅接收公开题目文件")
+    private, reference = packages.author_materials(raw, previous)
     seq = previous["seq"] + 1
     version = f"v{seq}.0"
     db().execute("INSERT INTO problem_versions VALUES(?,?,?,'草稿',?,?,?)",
-                 (project, seq, version, obj(data), previous["private_tests"], previous["reference_files"]))
+                 (project, seq, version, obj(data), obj(private), obj(reference)))
     audit("创建题目版本", f"{project}@{version}")
     db().commit()
     return ok(problem_dict(get_project_row(project, version, True)), 201)
@@ -619,3 +621,7 @@ def list_audits():
     require("admin")
     rows = db().execute("SELECT id,action,reason,time,actor FROM audits ORDER BY time DESC,rowid DESC")
     return ok(page_of([dict(r) for r in rows]))
+
+
+# Import route definitions after the catalog helpers they use.
+from . import packages  # noqa: E402,F401
