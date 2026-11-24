@@ -21,14 +21,15 @@ const completed = computed(
         .map((s) => s.problemId),
     ),
 );
+const keyword = computed(() => query.value.trim().toLowerCase());
 const filtered = computed(() =>
   state.problems.filter(
     (p) =>
       p.status === "已发布" &&
-      (!query.value ||
+      (!keyword.value ||
         `${p.title}${p.id}${p.tags.join("")}`
           .toLowerCase()
-          .includes(query.value.toLowerCase())) &&
+          .includes(keyword.value)) &&
       (!difficulty.value || p.difficulty === difficulty.value) &&
       (!type.value || p.type === type.value) &&
       (!stack.value || p.stack === stack.value) &&
