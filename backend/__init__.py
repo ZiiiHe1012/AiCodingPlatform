@@ -69,7 +69,7 @@ def create_app(config=None):
     with app.app_context():
         conn = db()
         conn.execute("PRAGMA journal_mode=WAL")
-        for module in (auth,):
+        for module in (auth, catalog):
             module.init_db(conn)
         conn.commit()
 
