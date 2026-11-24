@@ -1,27 +1,24 @@
 <script setup lang="ts">
-import { ref, computed, watch } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { state, audit } from "../store";
+import { request } from "../services/api";
+import { showError } from "../services/management";
+import { canManageBank, issueText, type Bank, type BankProblem, type CheckResult } from "../services/banks";
 import { defaultWeights, dimensionNames, validatePackagePath } from "../domain";
-import { validateProject } from "../project";
 import { taskTypes, stacks } from "../data";
 import type { Problem } from "../types";
 import Icon from "../components/Icon.vue";
 const route = useRoute(),
   router = useRouter();
-const old = state.problems.find((p) => p.id === route.params.id);
-const forbidden = computed(
-  () => !!old && old.bank === "内置题库" && state.role !== "admin",
-);
-const tab = ref("任务与需求"),
-  checked = ref(false),
-  errors = ref<string[]>([]);
-const form = ref<Problem>(
-  old
-    ? JSON.parse(JSON.stringify(old))
-    : {
-        id: "E" + Date.now(),
+const old = ref<BankProblem>();
+const banks = ref<Bank[]>([]), bankId = ref(""), ready = ref(false), busy = ref(false);
+const forbidden = ref(false);
+const tab = ref("任务与需求"), errors = ref<string[]>([]);
+const hiddenCases = ref(""), references = ref("{}");
+const savedSnapshot = ref(""), checkedSnapshot = ref("");
+const form = ref<Problem>({
+        id: "",
         title: "",
         type: "需求实现",
         difficulty: "中等",
@@ -59,23 +56,39 @@ const form = ref<Problem>(
           "AI 协作与验证记录",
         ],
         commands: { setup: "npm install", test: "npm test", start: "" },
-        evaluation: { timeout: 120, memory: 1024, network: "依赖白名单" },
+        evaluation: { timeout: 30, memory: 256, network: "禁用" },
         version: "v1.0",
-        bank: state.banks[0],
+        bank: "",
         status: "草稿",
         source: "课程小组原创",
         weights: [...defaultWeights],
-      },
-);
+      });
 const tags = ref(form.value.tags.join(", ")),
   file = ref(form.value.entryFile);
-watch(
-  form,
-  () => {
-    checked.value = false;
-  },
-  { deep: true },
-);
+type Materials = { private_tests: Record<string,string>; reference_files: Record<string,string> };
+const snapshot = computed(() => JSON.stringify([form.value, tags.value, hiddenCases.value, references.value, bankId.value]));
+const checked = computed(() => !!checkedSnapshot.value && checkedSnapshot.value === snapshot.value);
+function applySaved(p: BankProblem) {
+  old.value = p; form.value = JSON.parse(JSON.stringify(p));
+  bankId.value = p.bank_id; tags.value = p.tags.join(", ");
+  if (!(file.value in p.files)) file.value = p.entryFile;
+  savedSnapshot.value = snapshot.value;
+  checkedSnapshot.value = p.status === "预检通过" ? snapshot.value : "";
+}
+onMounted(async () => {
+  try {
+    banks.value = (await request<Bank[]>("GET","/banks")).filter(canManageBank);
+    const id = route.params.id;
+    if (!id) { bankId.value = banks.value[0]?.id || ""; return; }
+    const p = await request<BankProblem>("GET","/problems/"+encodeURIComponent(String(id))+"?manage=1");
+    if (!banks.value.some(b => b.id === p.bank_id)) { forbidden.value = true; return; }
+    const m = await request<Materials>("GET","/problem-versions/"+encodeURIComponent(p.problem_version_id)+"/author-materials");
+    hiddenCases.value = m.private_tests["cases.json"] || "";
+    references.value = JSON.stringify(m.reference_files,null,2);
+    file.value = p.entryFile; applySaved(p);
+  } catch (e) { forbidden.value = true; showError(e); }
+  finally { ready.value = true; }
+});
 async function addFile() {
   try {
     const { value } = await ElMessageBox.prompt(
@@ -103,46 +116,54 @@ async function removeFile() {
     file.value = form.value.entryFile;
   } catch {}
 }
-function validate() {
-  errors.value = validateProject(form.value);
-  checked.value = !errors.value.length;
-  return checked.value;
+async function persist() {
+  if (!form.value.title.trim()) throw new Error("请填写项目名称");
+  if (!bankId.value) throw new Error("请选择所属题库");
+  const previous = old.value;
+  if (previous && savedSnapshot.value === snapshot.value && ["草稿", "预检通过"].includes(previous.status)) return previous;
+  let reference: unknown;
+  try { reference = JSON.parse(references.value.trim() || "{}"); }
+  catch { throw new Error("参考实现须填写有效的 JSON 文件映射"); }
+  const payload = {...form.value, bank_id:bankId.value, tags:tags.value.split(/[,，]/).map(t=>t.trim()).filter(Boolean),
+    author_materials:{private_tests:hiddenCases.value.trim() ? {"cases.json":hiddenCases.value.trim()} : {}, reference_files:reference}};
+  const path = previous ? "/problems/"+encodeURIComponent(previous.id)+"/versions" : "/problems";
+  const saved = await request<BankProblem>("POST",path,payload);
+  applySaved(saved); return saved;
 }
-function save(publish: boolean) {
-  if (forbidden.value || (publish && !validate())) return;
-  if (!form.value.title.trim()) return ElMessage.warning("请填写项目名称");
-  const next: Problem = JSON.parse(JSON.stringify(form.value));
-  next.tags = tags.value
-    .split(",")
-    .map((t) => t.trim())
-    .filter(Boolean);
-  next.status = publish ? "已发布" : "草稿";
-  if (old?.status === "已发布") {
-    next.id = old.id + "-v" + Date.now();
-    next.version =
-      "v" + (Number(old.version.slice(1).split(".")[0]) + 1) + ".0";
-    state.problems.push(next);
-  } else {
-    const i = state.problems.findIndex((p) => p.id === next.id);
-    if (i >= 0) state.problems[i] = next;
-    else state.problems.push(next);
-  }
-  audit(publish ? "发布工程任务" : "保存工程任务", next.id);
-  ElMessage.success(publish ? "新版本已发布" : "草稿已保存");
-  router.push("/banks");
+async function save(action: "draft" | "precheck" | "publish") {
+  if (!ready.value || forbidden.value || busy.value) return;
+  busy.value = true; errors.value = [];
+  try {
+    const p = await persist();
+    if (action === "precheck") {
+      const report = await request<CheckResult>("POST","/problem-versions/"+encodeURIComponent(p.problem_version_id)+"/precheck");
+      errors.value = report.items.map(issueText);
+      if (report.valid) {
+        applySaved({...p, status:"预检通过"}); ElMessage.success(p.version+" 预检通过");
+      }
+      return;
+    }
+    if (action === "publish") {
+      await request("POST","/problem-versions/"+encodeURIComponent(p.problem_version_id)+"/publish");
+    }
+    ElMessage.success(p.version+(action === "publish" ? " 已发布" : " 草稿已保存"));
+    await router.push("/banks");
+  } catch (e) { showError(e); }
+  finally { busy.value = false; }
 }
 </script>
 <template>
-  <el-empty v-if="forbidden" description="只有管理员可以维护内置题库" />
+  <p v-if="!ready">正在读取题库…</p>
+  <el-empty v-else-if="forbidden" description="该题目不存在或当前账户无权维护" />
   <template v-else>
     <div class="page-heading">
       <h1>{{ old ? "编辑工程任务" : "创建工程任务" }}</h1>
       <div class="button-row">
         <el-button @click="router.push('/banks')">取消</el-button
-        ><el-button type="primary" @click="save(false)">保存草稿</el-button>
+        ><el-button type="primary" :loading="busy" @click="save('draft')">保存草稿</el-button>
       </div>
     </div>
-    <section class="panel editor-form-panel">
+    <section class="panel editor-form-panel" v-loading="busy">
       <div class="tab-row">
         <button
           v-for="t in ['任务与需求', '项目仓库', '验收与评分', '环境与发布']"
@@ -160,13 +181,7 @@ function save(publish: boolean) {
               ><el-input v-model="form.title" maxlength="80"
             /></el-form-item>
             <el-form-item label="所属题库"
-              ><el-select v-model="form.bank"
-                ><el-option
-                  v-for="b in state.banks"
-                  :key="b"
-                  :value="b" /><el-option
-                  v-if="state.role === 'admin'"
-                  value="内置题库" /></el-select
+              ><el-select v-model="bankId" :disabled="!!old"><el-option v-for="b in banks" :key="b.id" :label="b.name" :value="b.id"/></el-select
             ></el-form-item>
             <el-form-item label="任务类型"
               ><el-select v-model="form.type"
@@ -303,6 +318,12 @@ function save(publish: boolean) {
             "
             >添加验收场景</el-button
           >
+          <h3 class="project-field">出题人专用材料</h3>
+          <p class="muted tiny">隐藏验收与参考文件单独保存。考生的题面、工作区与 AI 上下文只使用公开项目文件。</p>
+          <el-form label-position="top">
+            <el-form-item label="隐藏验收（tests/hidden/cases.json）"><el-input v-model="hiddenCases" type="textarea" :rows="5" placeholder='可选。JSON 数组，覆盖 D1 与 D2，每项包含 dimension、module、function、args、expected。'/></el-form-item>
+            <el-form-item label="参考实现（相对路径 → 文件内容）"><el-input v-model="references" type="textarea" :rows="4" placeholder='{"src/solution.py": "…"}'/></el-form-item>
+          </el-form>
           <h3 class="project-field">交付物</h3>
           <el-checkbox-group v-model="form.deliverables"
             ><el-checkbox
@@ -350,29 +371,27 @@ function save(publish: boolean) {
                 v-model="form.commands.start"
                 placeholder="无预览服务时留空" /></el-form-item
             ><el-form-item label="网络策略"
-              ><el-select v-model="form.evaluation.network"
-                ><el-option value="禁用" /><el-option
-                  value="依赖白名单" /></el-select></el-form-item
+              ><el-input model-value="禁用" disabled /></el-form-item
             ><el-form-item label="单次测试时限（秒）"
               ><el-input-number
                 v-model="form.evaluation.timeout"
                 :min="1"
-                :max="600" /></el-form-item
+                :max="90" /></el-form-item
             ><el-form-item label="运行内存（MB）"
               ><el-input-number
                 v-model="form.evaluation.memory"
                 :min="128"
-                :max="4096"
+                :max="512"
                 :step="128"
             /></el-form-item>
           </div>
           <div class="publish-check">
             <Icon name="shield" :size="32" />
             <h2>发布检查</h2>
-            <el-button @click="validate">检查项目配置</el-button>
+            <el-button :loading="busy" @click="save('precheck')">保存并预检</el-button>
             <p v-for="e in errors" :key="e" class="danger">{{ e }}</p>
             <p v-if="checked" class="positive">项目配置完整</p>
-            <el-button type="primary" :disabled="!checked" @click="save(true)"
+            <el-button type="primary" :disabled="!checked" :loading="busy" @click="save('publish')"
               >发布任务</el-button
             >
           </div>

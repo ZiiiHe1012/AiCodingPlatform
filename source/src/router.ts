@@ -20,6 +20,21 @@ const routes = [
     component: () => import("./pages/Account.vue"),
     meta: { title: "个人设置" },
   },
+  {
+    path: "/problems",
+    component: () => import("./pages/Problems.vue"),
+    meta: { title: "探索题库" },
+  },
+  {
+    path: "/banks",
+    component: () => import("./pages/Banks.vue"),
+    meta: { title: "我的题库" },
+  },
+  {
+    path: "/problem-edit/:id?",
+    component: () => import("./pages/ProblemEditor.vue"),
+    meta: { title: "题目编辑" },
+  },
   { path: "/profile", redirect: "/" },
   { path: "/:pathMatch(.*)*", redirect: "/" },
 ];
