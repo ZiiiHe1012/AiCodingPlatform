@@ -145,6 +145,11 @@ async function archiveClass() {
       <div v-if="teacher" class="button-row">
         <el-button :disabled="selected.archived" @click="importDialog = true"
           ><Icon name="upload" :size="15" />导入成员</el-button
+        ><el-button
+          type="primary"
+          :disabled="selected.archived"
+          @click="router.push('/exams/new')"
+          >安排考试</el-button
         ><el-dropdown
           ><button class="icon-btn" aria-label="班级操作">
             <Icon name="more" /></button
@@ -232,7 +237,9 @@ async function archiveClass() {
     <div v-else class="form-panel">
       <p>任课教师：{{ selected.teacher }}</p>
       <p>成员数量：{{ selected.members.length }} 人</p>
-      
+      <el-button @click="router.push('/exams')"
+        >查看本班考试安排 <Icon name="arrow" :size="16"
+      /></el-button>
     </div>
   </section>
   <el-empty v-else description="尚未加入班级" /><el-dialog

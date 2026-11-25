@@ -65,7 +65,7 @@ const exams = computed(() =>
           ><Icon name="calendar" :size="15" />{{ formatTime(exam.start) }} —
           {{ formatTime(exam.end) }}</span
         ><span
-          ><Icon name="file" :size="15" />{{ exam.problemIds.length }} 道题目
+          ><Icon name="file" :size="15" />{{ exam.problemCount ?? exam.problemIds.length }} 道题目
           <i /> AI Coding</span
         ><span
           ><Icon name="sparkles" :size="15" />{{ exam.model }} ·

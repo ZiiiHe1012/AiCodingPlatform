@@ -1,24 +1,55 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
+import { ElMessage } from "element-plus";
 import { useRoute, useRouter } from "vue-router";
 import { state } from "../store";
 import { formatTime } from "../domain";
 import { isMock } from "../services/api";
+import { backend } from "../services/contracts";
+import { showError } from "../services/management";
 import Icon from "../components/Icon.vue";
 const route = useRoute(),
   router = useRouter(),
   agreed = ref(false);
 const exam = computed(() => state.exams.find((e) => e.id === route.params.id));
+const clock = ref(Date.now());
+let interval: ReturnType<typeof setInterval>;
+onMounted(() => { interval = setInterval(() => { clock.value = Date.now(); }, 1000); });
+onBeforeUnmount(() => clearInterval(interval));
 const inWindow = computed(
   () =>
     exam.value &&
     ((exam.value.id === "exam-1" && isMock) ||
-      (Date.now() >= Date.parse(exam.value.start) &&
-        Date.now() < Date.parse(exam.value.end))),
+      (clock.value >= Date.parse(exam.value.start) &&
+        clock.value < Date.parse(exam.value.end))),
 );
 const ready = computed(
   () => agreed.value && inWindow.value && !exam.value?.receipt,
 );
+const loadingPaper = ref(false);
+async function refreshPaper() {
+  const current = exam.value;
+  if (!current || isMock || current.problemIds.length || loadingPaper.value) return;
+  loadingPaper.value = true;
+  try {
+    const latest = await backend.exams.detail(current.id);
+    if (exam.value?.id === current.id) Object.assign(exam.value, latest);
+  } catch (error) {
+    showError(error);
+  } finally {
+    loadingPaper.value = false;
+  }
+}
+watch(inWindow, open => { if (open) void refreshPaper(); });
+async function openWorkspace() {
+  await refreshPaper();
+  const first = exam.value?.problemIds[0];
+  if (!first || !exam.value) {
+    ElMessage.info("试题尚未加载，请按服务器开考时间稍后重试。");
+    return;
+  }
+  await router.push({path: "/workspace/"+encodeURIComponent(first), query: {exam: exam.value.id}});
+}
 </script>
 <template>
   <el-empty v-if="!exam" description="考试不存在或无权访问" /><template v-else
@@ -39,7 +70,7 @@ const ready = computed(
           <div class="briefing-stats">
             <div>
               <span>题目数量</span
-              ><b>{{ exam.problemIds.length }} <small>道</small></b>
+              ><b>{{ exam.problemCount ?? exam.problemIds.length }} <small>道</small></b>
             </div>
             <div>
               <span>考试时长</span
@@ -52,7 +83,7 @@ const ready = computed(
                 <small>分钟</small></b
               >
             </div>
-            <div>
+            <div v-if="exam.snapshots?.length">
               <span>工程任务</span
               ><b class="language-label">{{
                 [...new Set((exam.snapshots || []).map((p) => p.type))].join(
@@ -108,7 +139,7 @@ const ready = computed(
           <h2>考前确认</h2>
           <div class="environment-check">
             <div><Icon name="success" />浏览器已就绪</div>
-            <div><Icon name="success" />项目编辑器已就绪</div>
+            <div><Icon name="success" />已读取服务器考试规则</div>
           </div>
 
           <template v-if="exam.receipt"
@@ -120,11 +151,7 @@ const ready = computed(
             </div>
             <el-button
               class="full-width"
-              @click="
-                router.push(
-                  '/workspace/' + exam.problemIds[0] + '?exam=' + exam.id,
-                )
-              "
+              v-if="false"
               >查看只读工作台</el-button
             ></template
           ><template v-else
@@ -133,12 +160,8 @@ const ready = computed(
             ><el-button
               type="primary"
               class="full-width"
-              :disabled="!ready"
-              @click="
-                router.push(
-                  '/workspace/' + exam.problemIds[0] + '?exam=' + exam.id,
-                )
-              "
+              :disabled="!ready || loadingPaper"
+              v-if="false"
               ><Icon name="arrow" :size="16" />进入考试</el-button
             >
             <p v-if="!inWindow" class="muted">当前不在考试时段</p></template
@@ -146,6 +169,7 @@ const ready = computed(
         </section>
         <section class="panel form-panel compact-panel">
           <h3>本场题目</h3>
+          <p v-if="!exam.problemIds.length" class="muted">试题在开考后公布。</p>
           <div
             v-for="(id, i) in exam.problemIds"
             :key="id"

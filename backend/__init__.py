@@ -13,7 +13,7 @@ from flask import Flask, g, jsonify, redirect, request, send_from_directory, url
 from werkzeug.exceptions import HTTPException
 from werkzeug.serving import run_simple
 
-from . import auth, catalog, frontend_bridge
+from . import auth, catalog, exams, frontend_bridge
 from .core import db, fail, ident, ok
 
 
@@ -69,11 +69,11 @@ def create_app(config=None):
     with app.app_context():
         conn = db()
         conn.execute("PRAGMA journal_mode=WAL")
-        for module in (auth, catalog):
+        for module in (auth, catalog, exams):
             module.init_db(conn)
         conn.commit()
 
-    for module in (auth, catalog):
+    for module in (auth, catalog, exams):
         app.register_blueprint(module.bp, url_prefix="/api/v1")
 
     app.register_blueprint(frontend_bridge.bp)

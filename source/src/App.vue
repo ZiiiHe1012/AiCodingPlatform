@@ -31,6 +31,7 @@ const nav = [
     items: [
       { path: "/", text: "个人主页", icon: "dashboard" },
       { path: "/problems", text: "探索题库", icon: "book", badge: "12" },
+      { path: "/exams", text: "考试中心", icon: "calendar" },
     ],
   },
   {
@@ -38,10 +39,22 @@ const nav = [
     items: [
       { path: "/classes", text: "我的班级", icon: "users" },
       { path: "/banks", text: "我的题库", icon: "folder" },
+      { path: "/mock", text: "个人模拟", icon: "code" },
     ],
   },
 ];
-const management = computed<{path:string;text:string;icon:string}[]>(() => []);
+const management = computed(() =>
+  state.role === "student"
+    ? []
+    : [
+        { path: "/exams/new", text: "组卷与发布", icon: "list" },
+        ...(state.role === "admin"
+          ? [
+
+            ]
+          : []),
+      ],
+);
 const roleName = computed(
   () => ({ student: "学生", teacher: "教师", admin: "管理员" })[state.role],
 );

@@ -42,7 +42,13 @@ export function connectBackend(api, state, ApiError) {
     if (!localState) localState = Object.fromEntries(keys.map(k=>[k,copy(state[k])]));
     profile = user;
     const [problems,banks] = await Promise.all([projectList(),request('/banks')]);
-    Object.assign(state,{problems,exams:[],submissions:[],classes:await request('/classes'),banks:banks.filter(b=>b.id!=='builtin').map(b=>b.name),users:[],keys:[],audits:[],aiUsage:{}});
+    Object.assign(state,{problems,exams:await request('/exams'),submissions:[],classes:await request('/classes'),banks:banks.filter(b=>b.id!=='builtin').map(b=>b.name),users:[],keys:[],audits:[],aiUsage:{}});
+  }
+  function upsert(rows,value) {
+    const previous=rows.find(r=>r.id===value.id);
+    if(previous) Object.assign(previous,value);
+    else rows.unshift(value);
+    return value;
   }
   async function route(to, localUser) {
     let user;
@@ -61,17 +67,24 @@ export function connectBackend(api, state, ApiError) {
       profile = user;
     }
     const manageProjects = to.path === '/banks' || to.path.startsWith('/problem-edit');
-    if (manageProjects || ['/problems'].includes(to.path)) {
+    if (manageProjects || ['/problems','/exams/new','/mock'].includes(to.path)) {
       const [problems,banks] = await Promise.all([projectList(manageProjects),request('/banks')]);
       state.problems = problems;
       state.banks = banks.filter(b => b.id !== 'builtin').map(b => b.name);
     }
-    if (['/classes'].includes(to.path)) state.classes = await request('/classes');
+    if (['/classes','/exams/new'].includes(to.path)) state.classes = await request('/classes');
+    if (['/exams'].includes(to.path)) state.exams = await request('/exams');
+    if (to.params.id && to.path.startsWith('/exams/')) upsert(state.exams,await request('/exams/'+encodeURIComponent(to.params.id)));
     return profile;
   }
   const remote={
     login:(username,password,remember)=>authenticate('login',{username,password,remember}),
     register:(username,password,nickname,remember)=>authenticate('register',{username,password,nickname,remember}),
+    async createExam(exam) {
+      const created=await request(exam.personal?'/mock-exams':'/exams','POST',exam);
+      exam.id=created.id;
+      return upsert(state.exams,created);
+    },
   };
   for(const [name,handler] of Object.entries(remote)) {
     api[name]=(...args)=>profile||name==='login'||name==='register'?handler(...args):original[name](...args);
