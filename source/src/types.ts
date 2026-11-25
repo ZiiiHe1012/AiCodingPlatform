@@ -53,12 +53,14 @@ export interface Exam {
   end: string;
   status: "草稿" | "已发布" | "进行中" | "已结束" | "成绩已发布" | "已归档";
   problemIds: string[];
+  problemCount?: number;
   weights: number[];
   model: string;
   requests: number;
   tokens: number;
   personal: boolean;
   leaderboard: boolean;
+  publicLeaderboard?: boolean;
   published: boolean;
   receipt?: string;
   snapshots?: Problem[];

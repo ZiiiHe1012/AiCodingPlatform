@@ -31,6 +31,21 @@ const routes = [
     meta: { title: "我的班级" },
   },
   {
+    path: "/exams",
+    component: () => import("./pages/Exams.vue"),
+    meta: { title: "考试中心" },
+  },
+  {
+    path: "/exams/new",
+    component: () => import("./pages/ExamBuilder.vue"),
+    meta: { title: "创建考试", roles: ["teacher", "admin"] },
+  },
+  {
+    path: "/exams/:id",
+    component: () => import("./pages/ExamDetail.vue"),
+    meta: { title: "考试详情" },
+  },
+  {
     path: "/banks",
     component: () => import("./pages/Banks.vue"),
     meta: { title: "我的题库" },
@@ -39,6 +54,11 @@ const routes = [
     path: "/problem-edit/:id?",
     component: () => import("./pages/ProblemEditor.vue"),
     meta: { title: "题目编辑" },
+  },
+  {
+    path: "/mock",
+    component: () => import("./pages/ExamBuilder.vue"),
+    meta: { title: "个人模拟" },
   },
   { path: "/profile", redirect: "/" },
   { path: "/:pathMatch(.*)*", redirect: "/" },

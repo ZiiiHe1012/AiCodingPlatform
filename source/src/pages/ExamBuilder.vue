@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
 import { state } from "../store";
@@ -18,6 +18,9 @@ const step = ref(0),
     new Date(Date.now() + 3600000),
     new Date(Date.now() + 9000000),
   ]),
+  immediate = ref(false),
+  limitRoster = ref(false),
+  selectedStudents = ref<string[]>([]),
   duration = ref(90),
   bank = ref(""),
   difficulty = ref(""),
@@ -33,9 +36,12 @@ const step = ref(0),
   requests = ref(40),
   tokens = ref(60000),
   board = ref(false),
+  publicBoard = ref(false),
   release = ref("manual"),
   busy = ref(false),
   mode = ref("手动选题");
+const classroom = computed(() => state.classes.find(c => c.id === classId.value));
+watch(classId, () => { selectedStudents.value = []; });
 const available = computed(() =>
   state.problems.filter(
     (p) =>
@@ -86,11 +92,13 @@ function next() {
     if (!title.value.trim()) return ElMessage.warning("请填写考试名称");
     if (!personal.value && !classId.value)
       return ElMessage.warning("请选择未归档班级");
+    if (!personal.value && limitRoster.value && !selectedStudents.value.length)
+      return ElMessage.warning("请选择参加考试的学生");
     if (
       !personal.value &&
       (!range.value ||
-        range.value[1] <= range.value[0] ||
-        range.value[0].getTime() < Date.now())
+        range.value[1].getTime() <= Date.now() ||
+        (!immediate.value && range.value[1] <= range.value[0]))
     )
       return ElMessage.warning("请选择未来有效的起止时间");
     if (duration.value < 1 || duration.value > 300)
@@ -109,7 +117,7 @@ async function publish() {
     return ElMessage.warning("请检查题目权重");
   busy.value = true;
   try {
-    const start = personal.value ? new Date() : range.value[0],
+    const start = personal.value || immediate.value ? new Date() : range.value[0],
       end = personal.value
         ? new Date(Date.now() + duration.value * 60000)
         : range.value[1];
@@ -131,9 +139,11 @@ async function publish() {
       requests: requests.value,
       tokens: tokens.value,
       personal: personal.value,
-      leaderboard: personal.value ? false : board.value,
+      leaderboard: !personal.value && board.value,
+      publicLeaderboard: !personal.value && board.value && publicBoard.value,
       published: false,
       snapshots: JSON.parse(JSON.stringify(chosen.value)),
+      ...(!personal.value && limitRoster.value ? {selectedParticipants:[...selectedStudents.value]} : {}),
       participantIds: personal.value
         ? ["u-student"]
         : state.classes
@@ -183,8 +193,15 @@ async function publish() {
                 :key="c.id"
                 :label="c.name"
                 :value="c.id" /></el-select></el-form-item
-          ><el-form-item v-if="!personal" label="考试时间（北京时间） *"
-            ><el-date-picker
+          ><el-form-item v-if="!personal" label="参加考生">
+            <el-checkbox v-model="limitRoster">仅指定学生参加</el-checkbox>
+            <el-select v-if="limitRoster" v-model="selectedStudents" multiple filterable placeholder="选择班级成员">
+              <el-option v-for="member in classroom?.members" :key="member.id" :value="member.id" :label="member.name" />
+            </el-select>
+          </el-form-item><el-form-item v-if="!personal" label="考试时间（北京时间） *"
+            ><el-checkbox v-model="immediate">发布后立即开始</el-checkbox>
+            <el-date-picker v-if="immediate" v-model="range[1]" type="datetime" placeholder="截止时间" />
+            <el-date-picker v-else
               v-model="range"
               type="datetimerange"
               start-placeholder="开始时间"
@@ -368,8 +385,10 @@ async function publish() {
             ><el-form-item label="班级排行榜"
               ><el-switch v-model="board" /><span class="muted switch-label"
                 >仅在考试结束且成绩发布后开放</span
-              ></el-form-item
-            ></el-form
+              ></el-form-item>
+              <el-form-item v-if="board"><el-checkbox v-model="publicBoard">平台公开匿名榜</el-checkbox>
+                <span class="muted switch-label">允许平台用户查看匿名排名和分数</span>
+              </el-form-item></el-form
           ></template
         >
       </template>
