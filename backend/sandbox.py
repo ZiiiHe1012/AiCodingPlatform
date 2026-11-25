@@ -37,7 +37,7 @@ class Interrupted(Exception):
 def _docker():
     cli = shutil.which("docker")
     if not cli:
-        raise ServiceFault("运行器缺少 Docker，请启动 Docker 并构建 codelab-runner:2 镜像。")
+        raise RunnerUnavailable("平台服务找不到 Docker 命令。请老师或管理员在运行 CodeLab 的电脑上安装 Docker，并确认服务可以使用它。")
     return cli
 
 
