@@ -1,6 +1,8 @@
 """Exam rules, participant snapshots, editor leases and atomic hand-in."""
 import json
 import math
+import re
+import time
 from datetime import datetime, timezone
 
 from flask import Blueprint, g, request
@@ -18,6 +20,12 @@ def init_db(conn):
       published_at TEXT);
     CREATE TABLE IF NOT EXISTS participants(exam_id TEXT NOT NULL REFERENCES exams(id),user_id TEXT NOT NULL
       REFERENCES users(id),PRIMARY KEY(exam_id,user_id));
+    CREATE TABLE IF NOT EXISTS leases(exam_id TEXT,user_id TEXT,client TEXT,token TEXT,until INTEGER,
+      PRIMARY KEY(exam_id,user_id));
+    CREATE TABLE IF NOT EXISTS drafts(user_id TEXT,scope TEXT,problem_id TEXT,version INTEGER,data TEXT,
+      PRIMARY KEY(user_id,scope,problem_id,version));
+    CREATE TABLE IF NOT EXISTS sheets(exam_id TEXT,user_id TEXT,id TEXT UNIQUE,data TEXT,created_at TEXT,
+      PRIMARY KEY(exam_id,user_id));
     CREATE INDEX IF NOT EXISTS exam_dates ON exams(state,end);
     """)
     # Old drafts stored only the unique classroom name. Bind the current class before a rename.
@@ -94,6 +102,11 @@ def display_status(row):
     return "已结束" if now() >= row["end"] else "进行中"
 
 
+def sheet_data(exam_id, user):
+    row = db().execute("SELECT data FROM sheets WHERE exam_id=? AND user_id=?", (exam_id, user)).fetchone()
+    return json.loads(row[0]) if row else None
+
+
 def editable_config(row):
     return {**json.loads(row["config"]), "start": row["start"], "end": row["end"]}
 
@@ -120,6 +133,11 @@ def exam_data(row, include_files=True):
         data["participantIds"] = [v[0] for v in db().execute("SELECT user_id FROM participants WHERE exam_id=?", (row["id"],))]
     else:
         data.pop("selectedParticipants", None)
+    sheet = sheet_data(row["id"], uid())
+    if sheet:
+        data["receipt"] = sheet["receipt"]
+        if include_files and disclose_selection:
+            data["finalDrafts"] = sheet["drafts"]
     if include_files and open_paper:
         data["snapshots"] = json.loads(row["snapshots"])
     return data
@@ -255,3 +273,189 @@ def cancel(eid):
 def clock(eid):
     row = accessible(eid)
     return ok({"server_time": now(), "deadline": row["end"]})
+
+
+def active(row):
+    if not participant(row, uid()):
+        fail(403, "当前账户不在考试名单")
+    if row["state"] != "published" or not row["start"] <= now() < row["end"] or sheet_data(row["id"], uid()):
+        fail(409, "当前考试不可作答")
+
+
+def writer(row):
+    active(row)
+    lease = db().execute("SELECT * FROM leases WHERE exam_id=? AND user_id=?", (row["id"], uid())).fetchone()
+    if not lease or lease["until"] <= time.time() or lease["token"] != request.headers.get("X-Exam-Session"):
+        fail(409, "请重新进入考试，或关闭其他写入会话")
+
+
+@bp.post("/exams/<eid>/sessions")
+def checkin(eid):
+    lock()
+    row = accessible(eid)
+    if not participant(row, uid()):
+        fail(403, "当前账户不在考试名单")
+    client = string(body().get("client_id"), "页面标识", 120)
+    locked = sheet_data(eid, uid()) or row["end"] <= now()
+    if not locked:
+        active(row)
+    previous = db().execute("SELECT * FROM leases WHERE exam_id=? AND user_id=?", (eid, uid())).fetchone()
+    readonly = bool(locked or (previous and previous["client"] != client and previous["until"] > time.time()))
+    token = None
+    if not readonly:
+        token = previous["token"] if previous and previous["client"] == client else ident("SES")
+        db().execute("INSERT OR REPLACE INTO leases VALUES(?,?,?,?,?)", (eid, uid(), client, token, int(time.time()) + 90))
+    return ok({"server_time": now(), "end_time": row["end"], "session_id": token, "read_only": readonly, "rules_version": "1"})
+
+
+@bp.delete("/exams/<eid>/sessions")
+def relinquish(eid):
+    db().execute("DELETE FROM leases WHERE exam_id=? AND user_id=? AND token=?", (eid, uid(), request.headers.get("X-Exam-Session")))
+    return ok(None)
+
+
+def context(problem_version_id, exam_id=None, write=False):
+    ref = string(problem_version_id, "题目版本", 150)
+    pid, _, version = ref.partition("@")
+    if not exam_id:
+        return catalog.get_problem(pid, version or None), None
+    row = accessible(string(exam_id, "考试编号", 120))
+    if write:
+        writer(row)
+    elif not manager(row) and (row["state"] != "published" or row["start"] > now()):
+        fail(403, "未到考试开放时间")
+    problem = next((p for p in json.loads(row["snapshots"]) if p["id"] == pid), None)
+    if not problem or (version and problem["version"] != version):
+        fail(409, "题目或版本与考试发布快照不符")
+    return problem, exam_data(row, False)
+
+
+def saved(user, scope, pid, version=None):
+    sql = "SELECT data FROM drafts WHERE user_id=? AND scope=? AND problem_id=?"
+    args = [user, scope, pid]
+    if version is not None:
+        sql += " AND version=?"
+        args.append(version)
+    r = db().execute(sql + " ORDER BY version DESC LIMIT 1", args).fetchone()
+    return json.loads(r[0]) if r else None
+
+
+def draft_scope(key, write=False):
+    parts = key.split(":")
+    if len(parts) != 3 or parts[0] != uid():
+        fail(403, "无权访问草稿")
+    user, scope, pid = parts
+    exam = None if scope == "practice-" + pid else scope
+    context(pid, exam, write)
+    return user, scope, pid
+
+
+def _chat_time(value):
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z", value):
+        try:
+            datetime.fromisoformat(value[:-1] + "+00:00")
+            return value
+        except ValueError:
+            pass
+
+
+def _finished_activity(activity):
+    if not isinstance(activity, dict) or activity.get("status") not in ("done", "failed", "cancelled"):
+        return None
+    steps = activity.get("steps")
+    if not isinstance(steps, list):
+        return None
+    result = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        kind = step.get("kind")
+        if kind not in ("accepted", "started", "resumed", "received", "read", "edited", "needsRevision",
+                        "tested", "testUnavailable", "done", "failed", "cancelled"):
+            continue
+        item = {"kind": kind}
+        detail = step.get("detail")
+        if isinstance(detail, str) and len(detail) <= 240:
+            if kind in ("read", "edited", "needsRevision") and all(
+                part not in ("", ".", "..") for part in detail.split("/")
+            ) and all(c.isprintable() for c in detail):
+                item["detail"] = detail
+            elif kind == "tested" and re.fullmatch(r"退出码 -?\d{1,10}", detail):
+                item["detail"] = detail
+        if stamp := _chat_time(step.get("at")):
+            item["at"] = stamp
+        result.append(item)
+    return {"status": activity["status"], "steps": result}
+
+
+def history(value, *, draft=False):
+    if not isinstance(value, list) or len(value) > 500:
+        fail(422, "对话记录格式无效")
+    turns = []
+    for turn in value:
+        if not isinstance(turn, dict) or turn.get("role") not in ("user", "assistant"):
+            fail(422, "无效的对话角色")
+        item = {"role": turn["role"], "text": string(turn.get("text"), "对话内容", 50000, optional=True)}
+        if draft and item["role"] == "assistant":
+            request_id = turn.get("requestId")
+            if isinstance(request_id, str) and re.fullmatch(r"(?:JOB-[a-f0-9]{24}|REQ-[0-9]{1,16})", request_id):
+                item["requestId"] = request_id
+            if stamp := _chat_time(turn.get("time")):
+                item["time"] = stamp
+            if activity := _finished_activity(turn.get("activity")):
+                item["activity"] = activity
+        turns.append(item)
+    return turns
+
+
+def write_draft(args, data, expected):
+    old = saved(*args)
+    ver = old["version"] if old else 0
+    if type(expected) is not int or expected != ver:
+        fail(409, "草稿版本冲突，请恢复服务器版本")
+    content = files(data.get("files"))
+    active_file = data.get("activeFile")
+    if not isinstance(active_file, str) or active_file not in content:
+        fail(422, "当前文件不在工程中")
+    draft = {"files": content, "activeFile": active_file, "explanation": string(data.get("explanation", ""), "说明", 50000, True),
+             "aiHistory": history(data.get("aiHistory", []), draft=True), "version": ver + 1, "updatedAt": now()}
+    if old and all(old[k] == draft[k] for k in ("files", "activeFile", "explanation", "aiHistory")):
+        return old
+    db().execute("INSERT INTO drafts VALUES(?,?,?,?,?)", (*args, ver + 1, obj(draft)))
+    return draft
+
+
+@bp.route("/drafts/<key>", methods=["GET", "PUT"])
+def draft(key):
+    if request.method == "GET":
+        value = saved(*draft_scope(key))
+        return ok(value) if value else fail(404, "没有已保存的草稿")
+    lock()
+    args = draft_scope(key, True)
+    data = body()
+    return ok(write_draft(args, data, data.get("version")))
+
+
+@bp.get("/exams/<eid>/drafts/<pid>")
+def exam_draft(eid, pid):
+    return draft(f"{uid()}:{eid}:{pid}")
+
+
+@bp.get("/drafts/<key>/versions")
+def versions(key):
+    args = draft_scope(key)
+    rows = db().execute("SELECT version,json_extract(data,'$.updatedAt') FROM drafts WHERE user_id=? AND scope=? AND problem_id=? ORDER BY version DESC", args)
+    return ok([{"version": r[0], "updatedAt": r[1]} for r in rows])
+
+
+@bp.post("/drafts/<key>/restore")
+def restore(key):
+    lock()
+    args = draft_scope(key, True)
+    data = body()
+    if type(data.get("version")) is not int:
+        fail(422, "请选择草稿版本")
+    old = saved(*args, data["version"])
+    if not old:
+        fail(404, "版本不存在")
+    return ok(write_draft(args, old, data.get("expected_version")))
