@@ -128,7 +128,8 @@ def exam_data(row, include_files=True):
 def build(data, personal):
     pids = data.get("problemIds")
     if (not isinstance(pids, list) or not 1 <= len(pids) <= 20
-            or any(not isinstance(p, str) for p in pids) or len(set(pids)) != len(pids)):
+            or any(not isinstance(p, str) for p in pids)
+            or len({catalog.version_parts(p, None)[0] for p in pids}) != len(pids)):
         fail(422, "应选 1–20 道不重复的工程题")
     start, end = iso(data.get("start")), iso(data.get("end"))
     if start >= end or end <= now():
