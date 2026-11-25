@@ -2,7 +2,8 @@
 import { ref, computed } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
-import { state, audit } from "../store";
+import { backend } from "../services/contracts";
+import { state } from "../store";
 import Icon from "../components/Icon.vue";
 const router = useRouter(),
   dialog = ref(false),
@@ -24,89 +25,74 @@ const teacher = computed(() => state.role !== "student"),
         `${m.id}${m.name}`.includes(memberSearch.value),
       ) || [],
   );
-function create() {
+function showError(error: unknown) {
+  if (error instanceof Error) ElMessage.error(error.message);
+}
+async function refreshClasses() {
+  state.classes = await backend.classes.list();
+}
+async function create() {
   if (!name.value.trim()) return ElMessage.warning("请输入班级名称");
-  const id = "class-" + Date.now();
-  state.classes.push({
-    id,
-    name: name.value.trim(),
-    teacher: "陈老师",
-    code: Math.random().toString(36).slice(2, 8).toUpperCase(),
-    members: [],
-    archived: false,
-  });
-  selectedId.value = id;
-  dialog.value = false;
-  audit("创建班级", name.value);
-  name.value = "";
-  ElMessage.success("班级已创建");
+  try {
+    const room = await backend.classes.create(name.value.trim());
+    await refreshClasses();
+    selectedId.value = room.id;
+    dialog.value = false;
+    name.value = "";
+    ElMessage.success("班级已创建");
+  } catch (error) { showError(error); }
 }
 async function join() {
-  const room = state.classes.find(
-    (c) => c.code === invite.value.trim().toUpperCase() && !c.archived,
-  );
-  if (!room) return ElMessage.warning("邀请码无效或班级已归档");
   try {
-    await ElMessageBox.confirm(
-      `班级：${room.name}；教师：${room.teacher}。确认加入？`,
-      "确认班级",
-    );
-    if (room.members.some((m) => m.id === "u-student"))
-      ElMessage.info("你已加入该班级，无需重复加入");
-    else {
-      room.members.push({
-        id: "u-student",
-        name: state.name,
-        joined: "2026-10-31",
-      });
-      ElMessage.success("加入成功");
-    }
-    dialog.value = false;
+    const code = invite.value.trim();
+    const info = await backend.classes.joinPreview(code);
+    await ElMessageBox.confirm(`班级：${info.class_name}，教师：${info.teacher_nickname}。确认加入？`, "确认班级");
+    const room = await backend.classes.join(code);
+    await refreshClasses();
     selectedId.value = room.id;
-  } catch {}
+    dialog.value = false;
+    ElMessage.success("已加入班级");
+  } catch (error) { showError(error); }
 }
 async function resetCode() {
   try {
-    await ElMessageBox.confirm(
-      "旧邀请码将失效，已加入成员及已冻结考试名单不受影响。",
-      "重置邀请码",
-    );
-    selected.value!.code = Math.random().toString(36).slice(2, 8).toUpperCase();
-    audit("重置邀请码", selected.value!.name);
-  } catch {}
+    await ElMessageBox.confirm("旧邀请码将失效，已冻结考试名单仍然有效。", "重置邀请码");
+    await backend.classes.resetCode(selectedId.value);
+    await refreshClasses();
+  } catch (error) { showError(error); }
 }
 async function remove(id: string) {
   try {
-    await ElMessageBox.confirm("确认将此成员移出班级？", "移除成员", {
-      type: "warning",
-    });
-    selected.value!.members = selected.value!.members.filter(
-      (m) => m.id !== id,
-    );
-    audit("移除班级成员", id);
-  } catch {}
+    await ElMessageBox.confirm("确认将此成员移出班级？", "移除成员", { type:"warning" });
+    await backend.classes.removeMember(selectedId.value, id);
+    await refreshClasses();
+  } catch (error) { showError(error); }
 }
-function importMembers() {
-  const lines = csv.value.trim().split(/\r?\n/);
-  const errors: string[] = [];
-  const parsed = lines.map((l, i) => {
-    const fields = l.split(",").map((s) => s.trim());
-    if (fields.length !== 2 || !fields.every(Boolean))
-      errors.push(`第 ${i + 1} 行：应为“用户编号,昵称”`);
-    return { id: fields[0], name: fields[1], joined: "2026-10-31" };
-  });
-  importErrors.value = errors;
-  if (errors.length || !csv.value.trim()) return;
-  let count = 0;
-  for (const m of parsed)
-    if (!selected.value!.members.some((x) => x.id === m.id)) {
-      selected.value!.members.push(m);
-      count++;
-    }
-  audit("导入班级成员", `${count} 人`);
-  ElMessage.success(`导入 ${count} 人，重复记录已跳过`);
-  importDialog.value = false;
-  csv.value = "";
+async function importMembers() {
+  if (!csv.value.trim()) return;
+  try {
+    const result = await backend.classes.importMembers(selectedId.value, csv.value.trim().split(/\r?\n/));
+    importErrors.value = result.errors.map(e => `第 ${e.line} 行：${e.message}`);
+    if (importErrors.value.length) return;
+    await refreshClasses();
+    importDialog.value = false;
+    csv.value = "";
+    ElMessage.success(`已导入 ${result.imported} 人，重复 ${result.duplicates} 人。`);
+  } catch (error) { showError(error); }
+}
+async function renameClass() {
+  try {
+    const { value } = await ElMessageBox.prompt("请输入新的班级名称","修改班级名称",{inputValue:selected.value?.name});
+    await backend.classes.update(selectedId.value,{name:value.trim()});
+    await refreshClasses();
+  } catch (error) { showError(error); }
+}
+async function archiveClass() {
+  try {
+    await ElMessageBox.confirm("归档后将关闭加入和导入成员。","归档班级");
+    await backend.classes.update(selectedId.value,{archived:true});
+    await refreshClasses();
+  } catch (error) { showError(error); }
 }
 </script>
 <template>
@@ -136,10 +122,10 @@ function importMembers() {
           c.archived ? "已归档" : "进行中"
         }}</span>
         <h2>{{ c.name }}</h2>
-        <p>{{ c.teacher }} · 2026 秋季</p>
+        <p>{{ c.teacher }}</p>
         <div class="class-counts">
           <span
-            ><Icon name="users" :size="15" />{{ c.members.length }} 位成员</span
+            ><Icon name="users" :size="15" />{{ c.memberCount ?? c.members.length }} 位成员</span
           ><span
             ><Icon name="calendar" :size="15" />{{
               state.exams.filter((e) => e.className === c.name).length
@@ -159,41 +145,16 @@ function importMembers() {
       <div v-if="teacher" class="button-row">
         <el-button :disabled="selected.archived" @click="importDialog = true"
           ><Icon name="upload" :size="15" />导入成员</el-button
-        ><el-button
-          type="primary"
-          :disabled="selected.archived"
-          @click="router.push('/exams/new')"
-          >安排考试</el-button
         ><el-dropdown
           ><button class="icon-btn" aria-label="班级操作">
             <Icon name="more" /></button
           ><template #dropdown
             ><el-dropdown-menu
               ><el-dropdown-item
-                @click="
-                  ElMessageBox.prompt('请输入新的班级名称', '修改班级名称', {
-                    inputValue: selected!.name,
-                    inputValidator: (v) => !!v.trim() || '名称不能为空',
-                  })
-                    .then(({ value }) => {
-                      selected!.name = value;
-                      audit('修改班级名称', value);
-                    })
-                    .catch(() => {})
-                "
+                @click="renameClass"
                 >修改名称</el-dropdown-item
               ><el-dropdown-item
-                @click="
-                  ElMessageBox.confirm(
-                    '归档后将停用邀请码并停止新成员导入。',
-                    '归档班级',
-                  )
-                    .then(() => {
-                      selected!.archived = true;
-                      audit('归档班级', selected!.name);
-                    })
-                    .catch(() => {})
-                "
+                @click="archiveClass"
                 >归档班级</el-dropdown-item
               ></el-dropdown-menu
             ></template
@@ -271,9 +232,7 @@ function importMembers() {
     <div v-else class="form-panel">
       <p>任课教师：{{ selected.teacher }}</p>
       <p>成员数量：{{ selected.members.length }} 人</p>
-      <el-button @click="router.push('/exams')"
-        >查看本班考试安排 <Icon name="arrow" :size="16"
-      /></el-button>
+      
     </div>
   </section>
   <el-empty v-else description="尚未加入班级" /><el-dialog

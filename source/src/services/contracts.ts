@@ -99,13 +99,13 @@ export const backend = {
         "/classes/invitations/preview",
         { code },
       ),
-    join: (code: string) => request("POST", "/classes/join", { code }),
+    join: (code: string) => request<ClassRoom>("POST", "/classes/join", { code }),
     update: (id: string, data: Partial<ClassRoom>) =>
       request("PATCH", `/classes/${id}`, data),
     resetCode: (id: string) =>
       request("POST", `/classes/${id}/invitation/reset`),
     importMembers: (id: string, members: string[]) =>
-      request("POST", `/classes/${id}/members/import`, { members }),
+      request<{imported:number; duplicates:number; errors:{line:number;message:string}[]}>("POST", `/classes/${id}/members/import`, { members }),
     removeMember: (id: string, userId: string) =>
       request("DELETE", `/classes/${id}/members/${userId}`),
   },

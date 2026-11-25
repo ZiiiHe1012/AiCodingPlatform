@@ -42,7 +42,7 @@ export function connectBackend(api, state, ApiError) {
     if (!localState) localState = Object.fromEntries(keys.map(k=>[k,copy(state[k])]));
     profile = user;
     const [problems,banks] = await Promise.all([projectList(),request('/banks')]);
-    Object.assign(state,{problems,exams:[],submissions:[],classes:[],banks:banks.filter(b=>b.id!=='builtin').map(b=>b.name),users:[],keys:[],audits:[],aiUsage:{}});
+    Object.assign(state,{problems,exams:[],submissions:[],classes:await request('/classes'),banks:banks.filter(b=>b.id!=='builtin').map(b=>b.name),users:[],keys:[],audits:[],aiUsage:{}});
   }
   async function route(to, localUser) {
     let user;
@@ -66,6 +66,7 @@ export function connectBackend(api, state, ApiError) {
       state.problems = problems;
       state.banks = banks.filter(b => b.id !== 'builtin').map(b => b.name);
     }
+    if (['/classes'].includes(to.path)) state.classes = await request('/classes');
     return profile;
   }
   const remote={

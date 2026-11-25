@@ -92,6 +92,7 @@ export interface Submission {
   };
 }
 export interface ClassRoom {
+  memberCount?: number;
   id: string;
   name: string;
   teacher: string;

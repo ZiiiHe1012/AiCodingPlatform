@@ -36,6 +36,7 @@ const nav = [
   {
     label: "我的资源",
     items: [
+      { path: "/classes", text: "我的班级", icon: "users" },
       { path: "/banks", text: "我的题库", icon: "folder" },
     ],
   },
