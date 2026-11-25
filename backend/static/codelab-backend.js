@@ -30,10 +30,19 @@ export function connectBackend(api, state, ApiError) {
     await load(user);
     return user;
   }
+  async function projectList(manage=false) {
+    const rows = [];
+    for (let page=1;;page++) {
+      const result = await request('/problems?page_size=100&page='+page+(manage?'&manage=1':''));
+      rows.push(...result.items);
+      if (!result.items.length || rows.length >= result.total) return rows;
+    }
+  }
   async function load(user) {
     if (!localState) localState = Object.fromEntries(keys.map(k=>[k,copy(state[k])]));
     profile = user;
-    Object.assign(state,{problems:[],exams:[],submissions:[],classes:[],banks:[],users:[],keys:[],audits:[],aiUsage:{}});
+    const [problems,banks] = await Promise.all([projectList(),request('/banks')]);
+    Object.assign(state,{problems,exams:[],submissions:[],classes:await request('/classes'),banks:banks.filter(b=>b.id!=='builtin').map(b=>b.name),users:[],keys:[],audits:[],aiUsage:{}});
   }
   async function route(to, localUser) {
     let user;
@@ -51,6 +60,13 @@ export function connectBackend(api, state, ApiError) {
     } else {
       profile = user;
     }
+    const manageProjects = to.path === '/banks' || to.path.startsWith('/problem-edit');
+    if (manageProjects || ['/problems'].includes(to.path)) {
+      const [problems,banks] = await Promise.all([projectList(manageProjects),request('/banks')]);
+      state.problems = problems;
+      state.banks = banks.filter(b => b.id !== 'builtin').map(b => b.name);
+    }
+    if (['/classes'].includes(to.path)) state.classes = await request('/classes');
     return profile;
   }
   const remote={

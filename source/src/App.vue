@@ -25,16 +25,19 @@ function toggleNavigation() {
   }
 }
 const updateViewport = () => { viewportWidth.value = window.innerWidth; };
-const nav: {label:string;items:{path:string;text:string;icon:string;badge?:string}[]}[] = [
+const nav = [
   {
     label: "工作空间",
     items: [
       { path: "/", text: "个人主页", icon: "dashboard" },
+      { path: "/problems", text: "探索题库", icon: "book", badge: "12" },
     ],
   },
   {
     label: "我的资源",
     items: [
+      { path: "/classes", text: "我的班级", icon: "users" },
+      { path: "/banks", text: "我的题库", icon: "folder" },
     ],
   },
 ];
@@ -147,7 +150,7 @@ onBeforeUnmount(() => {
           }}</b>
         </div>
         <div class="topbar-actions">
-          <form v-if="false" class="global-search" @submit.prevent="globalSearch">
+          <form class="global-search" @submit.prevent="globalSearch">
             <Icon name="search" :size="16" /><input
               v-model="search"
               aria-label="全局搜索题目"

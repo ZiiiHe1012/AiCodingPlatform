@@ -21,14 +21,15 @@ const completed = computed(
         .map((s) => s.problemId),
     ),
 );
+const keyword = computed(() => query.value.trim().toLowerCase());
 const filtered = computed(() =>
   state.problems.filter(
     (p) =>
       p.status === "已发布" &&
-      (!query.value ||
+      (!keyword.value ||
         `${p.title}${p.id}${p.tags.join("")}`
           .toLowerCase()
-          .includes(query.value.toLowerCase())) &&
+          .includes(keyword.value)) &&
       (!difficulty.value || p.difficulty === difficulty.value) &&
       (!type.value || p.type === type.value) &&
       (!stack.value || p.stack === stack.value) &&
@@ -141,16 +142,9 @@ function clear() {
             <tr
               v-for="p in filtered.slice((page - 1) * 20, page * 20)"
               :key="p.id"
-              class="clickable-row"
-              @click="router.push('/workspace/' + p.id)"
             >
               <td>
-                <RouterLink
-                  class="table-title"
-                  :to="'/workspace/' + p.id"
-                  @click.stop
-                  >{{ p.title }}</RouterLink
-                >
+                <b class="table-title">{{ p.title }}</b>
                 <div class="table-sub">
                   {{ p.id }} <span>· {{ p.tags.join(" / ") }}</span>
                 </div>
