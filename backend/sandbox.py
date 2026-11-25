@@ -84,11 +84,14 @@ def _acquire(docker, name, image):
                                 capture_output=True, text=True, timeout=18)
         if result.returncode == 0:
             return result.stdout.strip()
-        for _ in range(8):
+        # Docker reserves a name before inspect can see the newly created container.
+        # A worker starting the first command can race the background provisioner here.
+        name_reserved = "already in use" in result.stderr.lower()
+        for _ in range(30):
             owned = _owner(docker, name)
             if owned and owned[0]:
                 return owned[1]
-            if owned is None:
+            if owned is None and not name_reserved:
                 break
             time.sleep(.15)
         raise RunnerUnavailable(f"个人考试沙箱未能启动。请管理员在运行 CodeLab 的电脑上检查 Docker 和运行镜像 {image}。")
