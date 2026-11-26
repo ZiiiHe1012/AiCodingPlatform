@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from flask import Blueprint, g, request
 
 from . import catalog, exam_sandboxes
+from .ai_settings import model_options
 from .core import audit, body, db, fail, files, ident, now, obj, ok, require, string, uid
 
 bp = Blueprint("exams", __name__)
@@ -176,6 +177,8 @@ def build(data, personal):
     config["publicLeaderboard"] = public_board and config["leaderboard"] and not personal
     if not personal and roster is not None:
         config["selectedParticipants"] = roster
+    if config["model"] == "course-coder-v1":
+        config["model"] = model_options()["name"] or config["model"]
     for field, default, maximum in (("requests", 30, 500), ("tokens", 30000, 2000000), ("submissionLimit", 5, 100), ("publicRunLimit", 100, 500)):
         val = data.get(field, default)
         if type(val) is not int or not 1 <= val <= maximum:

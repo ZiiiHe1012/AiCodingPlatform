@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI 服务设置 · CodeLab</title>
+  <style>
+    * { box-sizing: border-box }
+    :root { color-scheme: light; font: 16px/1.6 Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; color: #1e293b; background: #f5f7fb }
+    body { margin: 0 }
+    [hidden] { display: none !important }
+    header { background: #fff; border-bottom: 1px solid #dde4ee }
+    header div { max-width: 810px; display: flex; align-items: center; justify-content: space-between; margin: auto; padding: 17px 24px }
+    header strong { color: #1e40af; font-size: 21px; letter-spacing: -.04em }
+    a { color: #234cb6; text-decoration: none }
+    a:hover { text-decoration: underline }
+    main { max-width: 760px; padding: 38px 24px 64px; margin: auto }
+    h1 { margin: 0; font-size: clamp(26px,4vw,34px); letter-spacing: -.035em }
+    main > h1 { margin-bottom: 20px }
+    .panel { background: white; border: 1px solid #dce3ef; border-radius: 12px; padding: clamp(18px,4vw,32px) }
+    .panel + .panel { margin-top: 18px }
+    h2 { margin: 0 0 18px; font-size: 19px }
+    .hint { color: #57667a; margin: -10px 0 16px }
+    fieldset { border: 0; padding: 0; margin: 0 0 16px }
+    legend { padding: 0; font-weight: 600 }
+    .option { display: inline-flex; gap: 6px; align-items: center; margin: 6px 16px 0 0 }
+    .option input { margin: 0 }
+    .field { display: block; font-weight: 600; margin-bottom: 18px }
+    .field input { display: block; width: 100%; max-width: 100%; margin-top: 6px; padding: 10px 12px; font: inherit; color: inherit; background: #fff; border: 1px solid #bdc8d9; border-radius: 6px }
+    #dailyLimitField input { width: 14rem }
+    input:focus-visible, button:focus-visible, a:focus-visible { outline: 3px solid #93b5ff; outline-offset: 2px }
+    small { display: block; color: #57667a; font-weight: 400; margin: 6px 0 0 }
+    .check { display: flex; align-items: center; gap: 8px; margin: -4px 0 22px; font-size: 14px }
+    button { cursor: pointer; font: inherit; font-weight: 600; border-radius: 6px; padding: 8px 19px; border: 1px solid #244eb8; color: #fff; background: #244eb8 }
+    button:disabled { opacity: .6; cursor: wait }
+    [role=status] { margin: 12px 0 0; font-size: 14px; white-space: pre-wrap }
+    [role=status]:empty { margin: 0 }
+    .error { color: #a32836 }
+  </style>
+</head>
+<body>
+<header><div><strong>CodeLab</strong><a href="/">返回平台</a></div></header>
+<main>
+  <h1>AI 服务设置</h1>
+  <form id="signin" class="panel" hidden>
+    <h2>管理员登录</h2>
+    <label class="field">用户名<input name="username" autocomplete="username" required maxlength="32"></label>
+    <label class="field">密码<input name="password" type="password" autocomplete="current-password" required maxlength="64"></label>
+    <button>登录</button>
+  </form>
+  <form id="settings" class="panel" hidden>
+    <h2>模型服务连接</h2>
+    <label class="field">模型接口地址<input type="url" name="url" maxlength="2048" placeholder="https://model.example.com/v1/chat/completions" autocomplete="off" spellcheck="false">
+    <small>填写供应商给出的完整 Chat Completions 接口地址。</small></label>
+    <label class="field">模型名称<input name="name" maxlength="160" autocomplete="off" spellcheck="false" placeholder="供应商提供的模型 ID"></label>
+    <label class="field">API 密钥<input type="password" name="key" maxlength="4096" autocomplete="new-password"><small id="keyState"></small></label>
+    <label class="check"><input type="checkbox" name="clear_key">清除已保存的密钥</label>
+    <fieldset id="dailyQuota">
+      <legend>全平台每日模型请求额度</legend>
+      <small>今日已尝试 <span id="dailyCallsUsed"></span> 次。每日 UTC 00:00（北京时间 08:00）重新计数。</small>
+      <label class="option"><input type="radio" name="dailyMode" value="unlimited">不限</label>
+      <label class="option"><input type="radio" name="dailyMode" value="paused">暂停调用</label>
+      <label class="option"><input type="radio" name="dailyMode" value="limited">设置每日上限</label>
+    </fieldset>
+    <label id="dailyLimitField" class="field" hidden>每日最多请求次数<input name="dailyLimit" type="text" pattern="[1-9][0-9]*" inputmode="numeric" title="请输入大于零的整数" autocomplete="off" required disabled></label>
+    <button>保存设置</button>
+    <p role="status" aria-live="polite"></p>
+  </form>
+  <p id="notice" role="status" aria-live="polite"></p>
+</main>
+<script type="module">
+  const signin = document.getElementById("signin");
+  const settings = document.getElementById("settings");
+  const dailyQuota = document.getElementById("dailyQuota");
+  const dailyLimitField = document.getElementById("dailyLimitField");
+  let savedDailyLimit;
+  const notice = document.getElementById("notice");
+  const endpoint = "/api/v1/settings/ai";
+  function message(value, error = false, target = notice) {
+    target.textContent = value;
+    target.classList.toggle("error", error);
+  }
+  async function api(path, method = "GET", body) {
+    const response = await fetch(path, {
+      method, credentials: "same-origin",
+      headers: body ? {"Content-Type":"application/json"} : {},
+      body: typeof body === "string" ? body : JSON.stringify(body)
+    });
+    const result = await response.json();
+    if (!response.ok) {
+      const error = new Error(result.message || "请求失败");
+      error.status = response.status;
+      throw error;
+    }
+    return result.data;
+  }
+  function showValues(config) {
+    settings.elements.url.value = config.url;
+    settings.elements.namedItem("name").value = config.name;
+    settings.elements.key.value = "";
+    settings.elements.clear_key.checked = false;
+    document.getElementById("keyState").textContent = config.key_configured
+      ? "已配置密钥。留空保留原值，填写后将更换密钥。" : "尚未配置密钥。无需鉴权的本地模型可留空。";
+    savedDailyLimit = config.daily_call_limit;
+    dailyQuota.hidden = savedDailyLimit === undefined;
+    settings.elements.dailyMode.value = savedDailyLimit == null ? "unlimited" : savedDailyLimit === 0 ? "paused" : "limited";
+    settings.elements.dailyLimit.value = savedDailyLimit > 0 ? String(savedDailyLimit) : "";
+    document.getElementById("dailyCallsUsed").textContent = (config.daily_calls_used ?? 0).toLocaleString("zh-CN");
+    toggleDailyLimit();
+    settings.hidden = false;
+  }
+  function toggleDailyLimit() {
+    const limited = !dailyQuota.hidden && settings.elements.dailyMode.value === "limited";
+    dailyLimitField.hidden = !limited;
+    settings.elements.dailyLimit.disabled = !limited;
+    settings.elements.dailyLimit.setCustomValidity("");
+  }
+  function showSignin() {
+    settings.hidden = true;
+    settings.reset();
+    signin.hidden = false;
+    for (const status of document.querySelectorAll("[role=status]")) status.textContent = "";
+  }
+  async function loadSettings(profile) {
+    if (profile.role !== "admin") {
+      showSignin();
+      message("此页面仅对管理员开放。", true);
+      return;
+    }
+    signin.hidden = true;
+    message("");
+    showValues(await api(endpoint));
+  }
+  function failed(error, status = notice) {
+    if (error.status === 401 || error.status === 403) {
+      showSignin();
+      message(error.message, true);
+    } else message(error.message || "连接失败，请刷新重试。", true, status);
+  }
+  async function submit(form, event, action) {
+    event.preventDefault();
+    const button = form.querySelector("button");
+    const status = form.querySelector("[role=status]") || notice;
+    button.disabled = true;
+    message("", false, status);
+    try { await action(status); } catch (error) { failed(error, status); }
+    finally { button.disabled = false; }
+  }
+  signin.addEventListener("submit", event => submit(signin, event, async () => {
+    const result = await api("/api/v1/auth/login", "POST", Object.fromEntries(new FormData(signin)));
+    signin.elements.password.value = "";
+    await loadSettings(result);
+  }));
+  dailyQuota.addEventListener("change", toggleDailyLimit);
+  settings.elements.dailyLimit.addEventListener("input", () => settings.elements.dailyLimit.setCustomValidity(""));
+  settings.addEventListener("submit", event => submit(settings, event, async status => {
+    const fields = settings.elements;
+    const data = {url: fields.url.value, name: fields.namedItem("name").value,
+      key: fields.key.value, clear_key: fields.clear_key.checked};
+    if (!dailyQuota.hidden) {
+      const mode = fields.dailyMode.value;
+      const limit = mode === "limited" ? Number(fields.dailyLimit.value) : mode === "paused" ? 0 : null;
+      if (mode === "limited" && (!Number.isSafeInteger(limit) || limit < 1)) {
+        fields.dailyLimit.setCustomValidity("请输入 1 至 9007199254740991 之间的整数。");
+        fields.dailyLimit.reportValidity();
+        return;
+      }
+      if (limit !== savedDailyLimit) data.daily_call_limit = limit;
+    }
+    showValues(await api(endpoint, "PUT", data));
+    message("设置已保存。", false, status);
+  }));
+  try { await loadSettings(await api("/api/v1/users/me")); } catch (error) { failed(error); }
+</script>
+</body>
+</html>
