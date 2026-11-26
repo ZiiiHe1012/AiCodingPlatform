@@ -8,6 +8,7 @@ from flask import Blueprint
 
 from . import exams, sandbox
 from .core import body, db, fail, ok, uid
+from .ai_settings import model_options
 
 bp = Blueprint("workspaces", __name__)
 _preview_slots = threading.BoundedSemaphore(2)
@@ -43,7 +44,7 @@ def detail(scope, pid):
                "exam_id": eid, "runner_status": status, "runner_note": note, "version": draft["version"] if draft else 0,
                "preview_available": "index.html" in (draft["files"] if draft else problem["files"]),
                "stack": problem["stack"], "model": (json.loads(exams.exam_row(eid)["config"])["model"]
-               if eid else "")})
+               if eid else model_options()["name"])})
 
 
 def preview_actions(value):
