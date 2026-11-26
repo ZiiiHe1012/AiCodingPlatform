@@ -13,13 +13,15 @@ from flask import Flask, g, jsonify, redirect, request, send_from_directory, url
 from werkzeug.exceptions import HTTPException
 from werkzeug.serving import run_simple
 
-from . import auth, catalog, exams, frontend_bridge
+from . import auth, catalog, exams, workspaces, exam_sandboxes, frontend_bridge
 from .core import db, fail, ident, ok
+from . import capacity
 
 
 @contextmanager
 def background_tasks(app, workers, model_slots):
     """Run the durable queue, exam clock, workspace maintenance and backups together."""
+    capacity.configure(app, workers, model_slots)
     stop = threading.Event()
 
     def poll(action, interval):
@@ -33,7 +35,7 @@ def background_tasks(app, workers, model_slots):
             if not worked:
                 stop.wait(interval)
 
-    actions = []
+    actions = [(exam_sandboxes.maintain_one, .75)]
     threads = []
     try:
         for action, interval in actions:
@@ -59,6 +61,7 @@ def create_app(config=None):
         app.config.update(config)
     Path(app.config["DATABASE"]).parent.mkdir(parents=True, exist_ok=True)
     app.json.ensure_ascii = False
+    capacity.configure(app)
 
     @app.teardown_appcontext
     def close_db(error):
@@ -69,11 +72,11 @@ def create_app(config=None):
     with app.app_context():
         conn = db()
         conn.execute("PRAGMA journal_mode=WAL")
-        for module in (auth, catalog, exams):
+        for module in (auth, catalog, exams, exam_sandboxes):
             module.init_db(conn)
         conn.commit()
 
-    for module in (auth, catalog, exams):
+    for module in (auth, catalog, exams, workspaces):
         app.register_blueprint(module.bp, url_prefix="/api/v1")
 
     app.register_blueprint(frontend_bridge.bp)

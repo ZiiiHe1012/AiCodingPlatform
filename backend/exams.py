@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from flask import Blueprint, g, request
 
-from . import catalog
+from . import catalog, exam_sandboxes
 from .core import audit, body, db, fail, files, ident, now, obj, ok, require, string, uid
 
 bp = Blueprint("exams", __name__)
@@ -265,6 +265,7 @@ def cancel(eid):
     if row["state"] != "draft" and (row["state"] != "published" or now() >= row["start"]):
         fail(409, "仅可取消尚未开考的场次")
     audit("取消考试", string(body().get("reason"), "原因", 1000))
+    exam_sandboxes.retire(eid)
     db().execute("UPDATE exams SET state='cancelled' WHERE id=?", (eid,))
     return ok(exam_data(exam_row(eid)))
 
@@ -303,6 +304,7 @@ def checkin(eid):
     readonly = bool(locked or (previous and previous["client"] != client and previous["until"] > time.time()))
     token = None
     if not readonly:
+        exam_sandboxes.register(eid, uid())
         token = previous["token"] if previous and previous["client"] == client else ident("SES")
         db().execute("INSERT OR REPLACE INTO leases VALUES(?,?,?,?,?)", (eid, uid(), client, token, int(time.time()) + 90))
     return ok({"server_time": now(), "end_time": row["end"], "session_id": token, "read_only": readonly, "rules_version": "1"})
