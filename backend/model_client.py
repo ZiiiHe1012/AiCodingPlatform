@@ -130,6 +130,8 @@ def _request(messages, max_tokens, checkpoint, *, model, request_key):
             results.put(exc)
         except (ValueError, TypeError, AttributeError, KeyError, IndexError, RecursionError):
             results.put(InvalidModelResponse("模型响应不符合 JSON 对象格式。"))
+        except TimeoutError:
+            results.put(TransientServiceFault("连接模型服务或等待其回复超时。请管理员检查平台主机到模型接口的 HTTPS 连接。"))
         except ConnectionRefusedError:
             results.put(TransientServiceFault("模型服务或已配置的代理拒绝连接。请管理员检查服务地址和代理是否运行。"))
         except ssl.SSLCertVerificationError:
