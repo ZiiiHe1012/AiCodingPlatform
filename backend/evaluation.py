@@ -396,6 +396,7 @@ def _agent(row, token, data, check):
     messages = [{"role": "system", "content": instructions},
                 {"role": "user", "content": obj(prompt)}]
     changes, total = {}, 0
+    test_notice = ""
     def event(action, detail):
         _log(row["id"], action, detail)
         db().commit()
@@ -407,6 +408,8 @@ def _agent(row, token, data, check):
         action, path = answer.get("action"), answer.get("file")
         if action == "finish" and isinstance(answer.get("text"), str):
             summary = answer["text"][:12000]
+            if test_notice:
+                summary = "以下为助手对代码的分析，涉及本次测试结果的说法均未经验证。\n" + summary
             break
         if action == "read" and isinstance(path, str) and path in project:
             detail = project[path][:12000]
@@ -430,9 +433,18 @@ def _agent(row, token, data, check):
             detail = "已写入项目工作副本，等待用户确认保存。"
             event("修改工作副本", path)
         elif action == "test" and mode != "仅分析建议" and rules.get("aiContext") != "当前文件":
-            result = _terminal(project, problem, None, check, row)
-            detail = f"退出码 {result['code']}\n{result['output'][:4000]}"
-            event("执行公开测试", f"退出码 {result['code']}")
+            if test_notice:
+                summary = "运行器恢复后，可重新运行公开测试。"
+                break
+            try:
+                result = _terminal(project, problem, None, check, row)
+            except RunnerUnavailable as exc:
+                test_notice = f"平台记录显示，最近一次请求的公开测试未执行。{exc}"
+                event("公开测试未执行", str(exc))
+                detail = test_notice + " 请根据已有代码继续回答，本次任务不再调用 test。"
+            else:
+                detail = f"退出码 {result['code']}\n{result['output'][:4000]}"
+                event("执行公开测试", f"退出码 {result['code']}")
         else:
             raise ServiceFault("模型请求了超出本次授权范围的操作。")
         messages.extend([{"role": "assistant", "content": obj(answer)},
@@ -441,6 +453,8 @@ def _agent(row, token, data, check):
         summary = f"已达到本次任务的 {max_steps} 步上限，可展开操作记录查看进度。"
         if changes:
             summary += "已生成的文件建议可在下方预览。"
+    if test_notice:
+        summary = test_notice + "\n\n" + summary
     target = next(iter(changes), "")
     return {"text": summary, "suggestion": changes.get(target, ""), "file": target,
             "changes": changes, "tokens": total}
