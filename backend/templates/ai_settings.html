@@ -27,7 +27,7 @@
     .option input { margin: 0 }
     .field { display: block; font-weight: 600; margin-bottom: 18px }
     .field input { display: block; width: 100%; max-width: 100%; margin-top: 6px; padding: 10px 12px; font: inherit; color: inherit; background: #fff; border: 1px solid #bdc8d9; border-radius: 6px }
-    #dailyLimitField input { width: 14rem }
+    #stepField input, #dailyLimitField input { width: 14rem }
     input:focus-visible, button:focus-visible, a:focus-visible { outline: 3px solid #93b5ff; outline-offset: 2px }
     small { display: block; color: #57667a; font-weight: 400; margin: 6px 0 0 }
     .check { display: flex; align-items: center; gap: 8px; margin: -4px 0 22px; font-size: 14px }
@@ -43,10 +43,22 @@
 <main>
   <h1>AI 服务设置</h1>
   <form id="signin" class="panel" hidden>
-    <h2>管理员登录</h2>
+    <h2>教师或管理员登录</h2>
     <label class="field">用户名<input name="username" autocomplete="username" required maxlength="32"></label>
     <label class="field">密码<input name="password" type="password" autocomplete="current-password" required maxlength="64"></label>
     <button>登录</button>
+  </form>
+  <form id="workflow" class="panel" hidden>
+    <h2>AI 单次任务步骤上限</h2>
+    <p class="hint">每调用一次模型计一步，包括生成最终回复。此上限对全平台新发起的 AI 助手任务生效。考试的 AI 对话配额单独计算。</p>
+    <fieldset>
+      <legend>每个任务最多可执行的步骤</legend>
+      <label class="option"><input type="radio" name="mode" value="unlimited" checked>不限步数（默认）</label>
+      <label class="option"><input type="radio" name="mode" value="limited">自定义步数</label>
+    </fieldset>
+    <label id="stepField" class="field" hidden>最大步数<input name="max_steps" pattern="[1-9][0-9]*" inputmode="numeric" title="请输入大于零的整数" autocomplete="off" required disabled></label>
+    <button>保存步骤上限</button>
+    <p role="status" aria-live="polite"></p>
   </form>
   <form id="settings" class="panel" hidden>
     <h2>模型服务连接</h2>
@@ -70,12 +82,15 @@
 </main>
 <script type="module">
   const signin = document.getElementById("signin");
+  const workflow = document.getElementById("workflow");
+  const stepField = document.getElementById("stepField");
   const settings = document.getElementById("settings");
   const dailyQuota = document.getElementById("dailyQuota");
   const dailyLimitField = document.getElementById("dailyLimitField");
   let savedDailyLimit;
   const notice = document.getElementById("notice");
   const endpoint = "/api/v1/settings/ai";
+  const workflowEndpoint = "/api/v1/settings/agent-workflow";
   function message(value, error = false, target = notice) {
     target.textContent = value;
     target.classList.toggle("error", error);
@@ -86,7 +101,10 @@
       headers: body ? {"Content-Type":"application/json"} : {},
       body: typeof body === "string" ? body : JSON.stringify(body)
     });
-    const result = await response.json();
+    // Preserve the full decimal value even when it exceeds JavaScript's safe integer range.
+    const result = path === workflowEndpoint && response.ok
+      ? JSON.parse((await response.text()).replace(/("max_steps"\s*:\s*)(\d+)/, '$1"$2"'))
+      : await response.json();
     if (!response.ok) {
       const error = new Error(result.message || "请求失败");
       error.status = response.status;
@@ -115,21 +133,34 @@
     settings.elements.dailyLimit.disabled = !limited;
     settings.elements.dailyLimit.setCustomValidity("");
   }
+  function toggleStepField() {
+    const limited = workflow.elements.mode.value === "limited";
+    stepField.hidden = !limited;
+    workflow.elements.max_steps.disabled = !limited;
+  }
+  function showWorkflow(config) {
+    workflow.elements.mode.value = config.max_steps === null ? "unlimited" : "limited";
+    workflow.elements.max_steps.value = config.max_steps ?? "";
+    toggleStepField();
+    workflow.hidden = false;
+  }
   function showSignin() {
+    workflow.hidden = true;
     settings.hidden = true;
     settings.reset();
     signin.hidden = false;
     for (const status of document.querySelectorAll("[role=status]")) status.textContent = "";
   }
   async function loadSettings(profile) {
-    if (profile.role !== "admin") {
+    if (!["admin", "teacher"].includes(profile.role)) {
       showSignin();
-      message("此页面仅对管理员开放。", true);
+      message("此页面仅对教师和管理员开放。", true);
       return;
     }
     signin.hidden = true;
     message("");
-    showValues(await api(endpoint));
+    showWorkflow(await api(workflowEndpoint));
+    if (profile.role === "admin") showValues(await api(endpoint));
   }
   function failed(error, status = notice) {
     if (error.status === 401 || error.status === 403) {
@@ -150,6 +181,12 @@
     const result = await api("/api/v1/auth/login", "POST", Object.fromEntries(new FormData(signin)));
     signin.elements.password.value = "";
     await loadSettings(result);
+  }));
+  workflow.addEventListener("change", toggleStepField);
+  workflow.addEventListener("submit", event => submit(workflow, event, async status => {
+    const maxSteps = workflow.elements.mode.value === "limited" ? workflow.elements.max_steps.value : "null";
+    showWorkflow(await api(workflowEndpoint, "PUT", `{"max_steps":${maxSteps}}`));
+    message("步骤上限已保存。", false, status);
   }));
   dailyQuota.addEventListener("change", toggleDailyLimit);
   settings.elements.dailyLimit.addEventListener("input", () => settings.elements.dailyLimit.setCustomValidity(""));

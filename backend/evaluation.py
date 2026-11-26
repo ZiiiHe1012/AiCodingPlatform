@@ -1,10 +1,14 @@
 """Durable evaluation, isolated public runs and project-scoped model tasks."""
 from datetime import datetime, timedelta
+from itertools import count
 import json
+import hashlib
 import time
 
 import click
 from flask import Blueprint, g, request
+from . import capacity, model_client
+from .ai_settings import agent_max_steps
 from .core import audit, body, db, fail, files, ident, now, obj, ok, require, uid
 from .sandbox import Interrupted, RunnerUnavailable, ServiceFault, TransientServiceFault, sandbox
 
@@ -26,6 +30,14 @@ def init_db(conn):
       CREATE TABLE IF NOT EXISTS evaluation_events(
         id INTEGER PRIMARY KEY, job_id TEXT NOT NULL, at TEXT NOT NULL, event TEXT NOT NULL, detail TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS evaluation_trace ON evaluation_events(job_id,id);
+      CREATE TABLE IF NOT EXISTS evaluation_usage(
+        user_id TEXT NOT NULL, scope TEXT NOT NULL, calls INTEGER NOT NULL, tokens INTEGER NOT NULL,
+        PRIMARY KEY(user_id,scope));
+      CREATE TABLE IF NOT EXISTS evaluation_model_steps(
+        job_id TEXT NOT NULL, step INTEGER NOT NULL, user_id TEXT NOT NULL, scope TEXT NOT NULL,
+        fingerprint TEXT NOT NULL, token TEXT NOT NULL, reserved INTEGER NOT NULL,
+        answer TEXT, actual INTEGER, PRIMARY KEY(job_id,step));
+      CREATE INDEX IF NOT EXISTS model_reservations ON evaluation_model_steps(user_id,scope);
     """)
 
 
@@ -92,9 +104,14 @@ def _new_interactive(kind, payload, exam, problem):
     # Keep only public metadata the runner needs, and the exact submitted working copy.
     meta_keys = ("id", "version", "stack", "requirements", "title", "evaluation", "entryFile",
                  "acceptance", "repository", "commands", "weights")
+    if kind == "ai":
+        meta_keys += ("description", "constraints", "deliverables")
     payload["problem"] = {k: problem[k] for k in meta_keys if k in problem}
     payload["rules"] = {k: exam[k] for k in ("end", "requests", "tokens", "aiMode", "aiContext", "model")
                         if exam and k in exam}
+    if kind == "ai":
+        # Freeze the policy alongside the task so a resumed job sees the same prompt and budget.
+        payload["rules"]["max_steps"] = agent_max_steps()
     jid = _create(kind, uid(), exam_id, problem["id"], payload)
     conn.commit()
     return jid
@@ -129,6 +146,21 @@ def run():
     if command is not None and (not isinstance(command, str) or not 1 <= len(command.strip()) <= 500):
         fail(400, "终端命令需要 1–500 个字符。")
     jid = _new_interactive("run", {"files": project, "command": command}, exam, problem)
+    return _respond(jid, data.get("async") is True)
+
+
+@bp.post("/ai/messages")
+def ask():
+    data = body()
+    problem, exam, project = _request_context(data)
+    msg, active = data.get("message"), data.get("active_file") or problem["entryFile"]
+    if not isinstance(msg, str) or not 1 <= len(msg.strip()) <= 8000:
+        fail(400, "问题需要 1–8000 个字符。")
+    if not isinstance(active, str) or active not in project:
+        fail(400, "当前文件不存在。")
+    if exam and exam.get("aiContext") == "当前文件":
+        project = {active: project[active]}
+    jid = _new_interactive("ai", {"files": project, "message": msg, "active": active}, exam, problem)
     return _respond(jid, data.get("async") is True)
 
 
@@ -210,6 +242,7 @@ def _claim(jid):
     token = ident("LEASE")
     conn.execute("""UPDATE evaluation_jobs SET state='running',token=?,lease=?,attempts=attempts+1,
                  updated=? WHERE id=?""", (token, time.time()+45, now(), row["id"]))
+    conn.execute("DELETE FROM evaluation_model_steps WHERE job_id=? AND actual IS NULL", (row["id"],))
     _log(row["id"], "执行开始", "恢复中断任务" if public_job_state(row["state"]) == "running" else "")
     conn.commit()
     return row, token
@@ -251,6 +284,168 @@ def _terminal(project, problem, command, check, workspace=None):
     return sandbox(project, {"action": "command", "argv": ["/bin/sh", "-c", command]}, problem, check, workspace=identity)
 
 
+class QuotaFault(ServiceFault):
+    pass
+
+
+def _prune_reservations():
+    db().execute("""DELETE FROM evaluation_model_steps WHERE actual IS NULL AND NOT EXISTS (
+        SELECT 1 FROM evaluation_jobs j WHERE j.id=evaluation_model_steps.job_id
+        AND j.token=evaluation_model_steps.token AND j.state='running' AND j.lease>?)""", (time.time(),))
+
+
+def _usage(user_id, scope, limits):
+    conn = db()
+    counts = conn.execute("SELECT calls,tokens FROM evaluation_usage WHERE user_id=? AND scope=?",
+                          (user_id, scope)).fetchone()
+    pending = conn.execute("""SELECT count(*),COALESCE(sum(reserved),0) FROM evaluation_model_steps
+           WHERE user_id=? AND scope=? AND actual IS NULL""", (user_id, scope)).fetchone()
+    return {"requests": counts["calls"] if counts else 0, "tokens": counts["tokens"] if counts else 0,
+            "request_limit": limits[0], "token_limit": limits[1],
+            "reserved_requests": pending[0], "reserved_tokens": pending[1]}
+
+
+@bp.get("/ai/usage")
+def ai_usage():
+    scope = request.args.get("scope", "")
+    if not scope or len(scope) > 180:
+        fail(400, "请指定考试或练习范围。")
+    limits = (40, 60000)
+    if not scope.startswith("practice-"):
+        from .exams import accessible
+        rules = json.loads(accessible(scope)["config"])
+        limits = rules["requests"], rules["tokens"]
+    _prune_reservations()
+    return ok(_usage(uid(), scope, limits))
+
+
+def _quota_call(row, token, step, rules, messages, check):
+    if not model_client.configured():
+        raise ServiceFault("尚未配置模型服务，请联系教师或管理员。")
+    frozen = model_client.model_name(rules.get("model"))
+    conn = db()
+    scope = row["exam_id"] or ("practice-" + row["problem_id"])
+    limits = int(rules.get("requests", 40)), int(rules.get("tokens", 60000))
+    prompt_bound = sum(len(m["content"].encode()) + 16 for m in messages) + 16
+    fingerprint = hashlib.sha256(obj([frozen, messages]).encode()).hexdigest()
+    conn.execute("BEGIN IMMEDIATE")
+    _prune_reservations()
+    previous = conn.execute("""SELECT * FROM evaluation_model_steps WHERE job_id=? AND step=?""",
+                            (row["id"], step)).fetchone()
+    if previous and previous["actual"] is not None:
+        conn.commit()
+        if previous["fingerprint"] != fingerprint:
+            # A pre-upgrade job may have confirmed steps under the former four-round instruction.
+            if "max_steps" not in rules and messages[0]["content"] == model_client.AGENT_PROMPT:
+                legacy_prompt = model_client.AGENT_PROMPT.replace("优先使用提供的当前代码", "最多四轮，优先使用提供的当前代码")
+                original = [{**messages[0], "content": legacy_prompt}, *messages[1:]]
+                fingerprint = hashlib.sha256(obj([frozen, original]).encode()).hexdigest()
+            if previous["fingerprint"] != fingerprint:
+                raise ServiceFault("中断前后项目上下文发生变化，请重新发起操作。")
+        return json.loads(previous["answer"]), previous["actual"]
+    live = conn.execute("""SELECT 1 FROM evaluation_jobs WHERE id=? AND state='running' AND token=?""",
+                        (row["id"], token)).fetchone()
+    if not live:
+        conn.rollback()
+        raise Interrupted("任务已中止或由其他工作进程接管。")
+    usage = _usage(row["user_id"], scope, limits)
+    output_cap = min(2000, limits[1]-usage["tokens"]-usage["reserved_tokens"]-prompt_bound)
+    if usage["requests"] + usage["reserved_requests"] >= limits[0] or output_cap < 80:
+        conn.commit()
+        raise QuotaFault("AI 调用次数或 Token 额度不足。")
+    conn.execute("""INSERT INTO evaluation_model_steps
+                 (job_id,step,user_id,scope,fingerprint,token,reserved) VALUES(?,?,?,?,?,?,?)""",
+                 (row["id"], step, row["user_id"], scope, fingerprint, token, prompt_bound+output_cap))
+    conn.commit()
+    try:
+        answer, reported = model_client.chat(messages, output_cap, check, model=frozen,
+                                              request_key=f"{row['id']}-{step}-{fingerprint[:16]}")
+    except Exception:
+        conn.execute("DELETE FROM evaluation_model_steps WHERE job_id=? AND step=? AND token=? AND actual IS NULL",
+                     (row["id"], step, token))
+        conn.commit()
+        raise
+    actual = reported if type(reported) is int and reported > 0 else 0
+    conn.execute("BEGIN IMMEDIATE")
+    accepted = conn.execute("""UPDATE evaluation_model_steps SET answer=?,actual=?,reserved=0
+          WHERE job_id=? AND step=? AND token=? AND actual IS NULL AND EXISTS (
+             SELECT 1 FROM evaluation_jobs j WHERE j.id=? AND j.token=? AND j.state='running')""",
+          (obj(answer), actual, row["id"], step, token, row["id"], token)).rowcount
+    if accepted and actual:
+        conn.execute("""INSERT INTO evaluation_usage VALUES(?,?,1,?) ON CONFLICT(user_id,scope)
+              DO UPDATE SET calls=calls+1,tokens=tokens+excluded.tokens""", (row["user_id"], scope, actual))
+    conn.commit()
+    if not accepted:
+        raise Interrupted("任务已中止或由其他工作进程接管。")
+    return answer, actual
+
+
+def _agent(row, token, data, check):
+    rules, project, problem = data["rules"], dict(data["files"]), data["problem"]
+    mode = rules.get("aiMode", "对话与代码建议")
+    current = data["active"]
+    prompt = {"question": data["message"], "mode": mode, "task": problem["title"],
+              "requirements": problem["requirements"], "files": list(project), "active": current,
+              "active_content": project[current][:10000]}
+    prompt.update({k: problem[k] for k in ("description", "acceptance", "constraints", "deliverables")
+                   if k in problem})
+    max_steps = rules.get("max_steps")
+    instructions = model_client.AGENT_PROMPT
+    if max_steps is not None:
+        instructions += f"\n本次任务最多调用模型 {max_steps} 次，包含最后的 finish 回复。"
+    messages = [{"role": "system", "content": instructions},
+                {"role": "user", "content": obj(prompt)}]
+    changes, total = {}, 0
+    def event(action, detail):
+        _log(row["id"], action, detail)
+        db().commit()
+    event("接收问题", data["message"][:500])
+    for step in (count() if max_steps is None else range(max_steps)):
+        answer, usage = _quota_call(row, token, step, rules, messages, check)
+        total += usage
+        check()
+        action, path = answer.get("action"), answer.get("file")
+        if action == "finish" and isinstance(answer.get("text"), str):
+            summary = answer["text"][:12000]
+            break
+        if action == "read" and isinstance(path, str) and path in project:
+            detail = project[path][:12000]
+            event("读取文件", path)
+        elif action in ("write", "edit") and mode != "仅分析建议" and isinstance(path, str) and path in project:
+            content = answer.get("content")
+            if action == "edit":
+                before, after = answer.get("before"), answer.get("after")
+                if not isinstance(before, str) or not before or not isinstance(after, str):
+                    raise ServiceFault("局部修改必须包含原文和替换文本。")
+                if project[path].count(before) != 1:
+                    detail = "原文无法唯一定位，工作副本未更改。请读取当前文件再选择唯一片段。"
+                    event("建议需要修正", path)
+                    messages.extend([{"role": "assistant", "content": obj(answer)},
+                                     {"role": "user", "content": obj({"result": detail})}])
+                    continue
+                content = project[path].replace(before, after, 1)
+            if not isinstance(content, str) or len(content.encode()) > 65536:
+                raise ServiceFault("模型返回的文件建议无效。")
+            project[path] = changes[path] = content
+            detail = "已写入项目工作副本，等待用户确认保存。"
+            event("修改工作副本", path)
+        elif action == "test" and mode != "仅分析建议" and rules.get("aiContext") != "当前文件":
+            result = _terminal(project, problem, None, check, row)
+            detail = f"退出码 {result['code']}\n{result['output'][:4000]}"
+            event("执行公开测试", f"退出码 {result['code']}")
+        else:
+            raise ServiceFault("模型请求了超出本次授权范围的操作。")
+        messages.extend([{"role": "assistant", "content": obj(answer)},
+                         {"role": "user", "content": obj({"result": detail})}])
+    else:
+        summary = f"已达到本次任务的 {max_steps} 步上限，可展开操作记录查看进度。"
+        if changes:
+            summary += "已生成的文件建议可在下方预览。"
+    target = next(iter(changes), "")
+    return {"text": summary, "suggestion": changes.get(target, ""), "file": target,
+            "changes": changes, "tokens": total}
+
+
 def _finish(row, token, state, result, reason):
     conn = db()
     conn.execute("BEGIN IMMEDIATE")
@@ -277,14 +472,19 @@ def work_once(jid=None):
     try:
         check()
         data = json.loads(row["payload"])
-        outcome = _terminal(data["files"], data["problem"], data.get("command"), check, row)
-        code = outcome["code"]
-        message = f"退出码 {code}" + (" · 超过运行限时" if outcome["timed_out"] else "")
-        result = {"message": message + "\n" + outcome["output"], "exit_code": code}
-        state, reason = ("done", "") if code == 0 else ("code_error", message)
+        if row["kind"] == "ai":
+            result, state, reason = _agent(row, token, data, check), "done", ""
+        else:
+            outcome = _terminal(data["files"], data["problem"], data.get("command"), check, row)
+            code = outcome["code"]
+            message = f"退出码 {code}" + (" · 超过运行限时" if outcome["timed_out"] else "")
+            result = {"message": message + "\n" + outcome["output"], "exit_code": code}
+            state, reason = ("done", "") if code == 0 else ("code_error", message)
         check()
     except Interrupted as exc:
         state, result, reason = "cancelled", {}, str(exc)
+    except QuotaFault as exc:
+        state, result, reason = "failed", {"http_status": 429}, str(exc)
     except ServiceFault as exc:
         state, result, reason = "failed", {}, str(exc)
     except Exception:

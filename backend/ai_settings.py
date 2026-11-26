@@ -22,6 +22,37 @@ def init_db(conn):
             api_key TEXT
         )
     """)
+    # Decimal text preserves positive limits larger than SQLite's signed integers.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agent_workflow_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            max_steps TEXT
+        )
+    """)
+
+
+def agent_max_steps():
+    """Return the configured per-workflow step limit, or None for unlimited."""
+    row = db().execute("SELECT max_steps FROM agent_workflow_settings WHERE id=1").fetchone()
+    return int(row["max_steps"]) if row and row["max_steps"] is not None else None
+
+
+@bp.route("/api/v1/settings/agent-workflow", methods=["GET", "PUT"])
+def agent_workflow_settings():
+    require("teacher", "admin")
+    if request.method == "PUT":
+        data = body()
+        if set(data) != {"max_steps"}:
+            fail(422, "请仅提供工作流步数上限 max_steps")
+        limit = data["max_steps"]
+        if limit is not None and (type(limit) is not int or limit < 1):
+            fail(422, "工作流步数上限应为正整数或 null（不限）")
+        db().execute("""
+            INSERT INTO agent_workflow_settings(id,max_steps) VALUES(1,?)
+            ON CONFLICT(id) DO UPDATE SET max_steps=excluded.max_steps
+        """, (str(limit) if limit is not None else None,))
+        audit("更新 AI 工作流设置", f"每次工作流最多 {limit} 步" if limit is not None else "工作流步数不限")
+    return ok({"max_steps": agent_max_steps()})
 
 
 def model_options():
