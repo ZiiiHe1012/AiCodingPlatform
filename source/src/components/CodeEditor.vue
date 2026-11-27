@@ -20,7 +20,7 @@ const models = new Map<string, monaco.editor.ITextModel>();
 let currentFile = "";
 let switching = false;
 function language(path: string) {
-  const extension = path.split(".").pop() || "";
+  const extension = (path.split(".").pop() || "").toLowerCase();
   return (
     (
       {

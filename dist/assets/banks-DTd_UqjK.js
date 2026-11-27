@@ -1,1 +1,0 @@
-import{j as i,s as n}from"./index-QYEJ2429.js";function s(e){return!!e&&(e.owner_id===i()||e.id==="builtin"&&n.role==="admin")}function a(e){return[e.file,e.field,e.message].filter(Boolean).join(" · ")}export{s as c,a as i};
