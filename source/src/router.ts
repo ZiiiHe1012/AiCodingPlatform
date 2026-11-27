@@ -26,6 +26,11 @@ const routes = [
     meta: { title: "探索题库" },
   },
   {
+    path: "/workspace/:id",
+    component: () => import("./pages/Workspace.vue"),
+    meta: { title: "编程工作台" },
+  },
+  {
     path: "/classes",
     component: () => import("./pages/Classes.vue"),
     meta: { title: "我的班级" },

@@ -142,9 +142,16 @@ function clear() {
             <tr
               v-for="p in filtered.slice((page - 1) * 20, page * 20)"
               :key="p.id"
+              class="clickable-row"
+              @click="router.push('/workspace/' + p.id)"
             >
               <td>
-                <b class="table-title">{{ p.title }}</b>
+                <RouterLink
+                  class="table-title"
+                  :to="'/workspace/' + p.id"
+                  @click.stop
+                  >{{ p.title }}</RouterLink
+                >
                 <div class="table-sub">
                   {{ p.id }} <span>· {{ p.tags.join(" / ") }}</span>
                 </div>

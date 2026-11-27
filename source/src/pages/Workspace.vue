@@ -3,19 +3,21 @@ import {
   ref,
   computed,
   watch,
+  nextTick,
   onMounted,
   onBeforeUnmount,
   defineAsyncComponent,
 } from "vue";
-import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
+import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import Icon from "../components/Icon.vue";
 import ResizableWorkspace from "../components/ResizableWorkspace.vue";
 import ProjectExplorer from "../components/ProjectFiles.vue";
 import { state, userId } from "../store";
+import { platform, type JobProgress } from "../services/platform";
 import { api, isMock, ApiError } from "../services/api";
-import { dimensionNames, canUseAI, validatePackagePath } from "../domain";
-import { downloadProject, upgradeDraft, sameFiles } from "../project";
+import { dimensionNames, validatePackagePath } from "../domain";
+import { downloadProject, upgradeDraft } from "../project";
 import type { Draft, ProjectFiles } from "../types";
 const CodeEditor = defineAsyncComponent(
   () => import("../components/CodeEditor.vue"),
@@ -30,16 +32,24 @@ const problem = computed(
 );
 const scope = exam.value?.id || "practice-" + route.params.id;
 const key = userId() + ":" + scope + ":" + route.params.id;
+const draftStore = platform?.live ? sessionStorage : localStorage;
 const rawInitial = (
   exam.value?.receipt
     ? exam.value.finalDrafts?.[String(route.params.id)]
-    : JSON.parse(localStorage.getItem("codelab-draft-" + key) || "null")
+    : JSON.parse(draftStore.getItem("codelab-draft-" + key) || "null")
 ) as Draft | null;
 const initial = rawInitial ? upgradeDraft(rawInitial) : null;
 const files = ref<ProjectFiles>({
   ...(initial?.files || problem.value?.files || {}),
 });
-const suggestionFile = ref("");
+const historyRows = ref<{version:number; updatedAt:string}[]>([]);
+interface ChatMessage {
+  role: string;
+  text: string;
+  time?: string;
+  requestId?: string;
+}
+const runTask = ref<JobProgress | null>(null);
 const explanation = ref(initial?.explanation || ""),
   version = ref(initial?.version || 0),
   file = ref(initial?.activeFile || problem.value?.entryFile || "README.md"),
@@ -53,13 +63,7 @@ const explanation = ref(initial?.explanation || ""),
   running = ref(false),
   output = ref(""),
   runShown = ref(false),
-  message = ref(""),
-  aiBusy = ref(false),
-  suggestion = ref(""),
-  showSuggestion = ref(false),
-  chat = ref<
-    { role: string; text: string; time?: string; requestId?: string }[]
-  >(JSON.parse(localStorage.getItem("codelab-chat-" + key) || "[]")),
+  chat = ref<ChatMessage[]>(JSON.parse(draftStore.getItem("codelab-chat-" + key) || "[]")),
   receipt = ref(exam.value?.receipt || "");
 const explorerOpen = ref(true);
 const openedFiles = ref([file.value]);
@@ -85,8 +89,7 @@ let saveTimer: ReturnType<typeof setTimeout>;
 let tick: ReturnType<typeof setInterval>;
 let heartbeat: ReturnType<typeof setInterval>;
 let periodicSave: ReturnType<typeof setInterval>;
-let saving = false;
-let savePromise: Promise<void> | null = null;
+let savePromise: Promise<boolean> | null = null;
 const baseNow = () => {
   if (isMock && exam.value?.id === "exam-1") {
     const k = "codelab-demo-clock";
@@ -154,23 +157,13 @@ function exportProject() {
     chat.value,
   );
 }
-const usage = computed(
-  () => state.aiUsage[userId() + ":" + scope] || { requests: 0, tokens: 0 },
-);
-const aiAllowed = computed(() =>
-  canUseAI(
-    usage.value.requests,
-    usage.value.tokens,
-    exam.value?.requests || 40,
-    exam.value?.tokens || 60000,
-  ),
-);
 watch(
   chat,
-  () => localStorage.setItem("codelab-chat-" + key, JSON.stringify(chat.value)),
+  () => draftStore.setItem("codelab-chat-" + key, JSON.stringify(chat.value)),
   { deep: true },
 );
 function acquire() {
+  if (platform?.live && exam.value) { readOnly.value = platform.examReadOnly; return; }
   const l = JSON.parse(localStorage.getItem(lockKey) || "null");
   if (l && l.session !== session && Date.now() - l.time < 8000) {
     readOnly.value = true;
@@ -179,51 +172,44 @@ function acquire() {
   readOnly.value = false;
   localStorage.setItem(lockKey, JSON.stringify({ session, time: Date.now() }));
 }
-async function save() {
-  if (saving) {
-    if (savePromise) await savePromise;
-    return;
-  }
-  if (frozen.value || conflict.value) return;
-  saving = true;
+async function saveDraft(): Promise<boolean> {
   saveState.value = "保存中…";
   const draft: Draft = {
-    files: JSON.parse(JSON.stringify(files.value)),
-    activeFile: file.value,
-    aiHistory: JSON.parse(JSON.stringify(chat.value)),
-    explanation: explanation.value,
-    version: version.value,
-    updatedAt: "",
+    files: { ...files.value }, activeFile: file.value, aiHistory: JSON.parse(JSON.stringify(chat.value)),
+    explanation: explanation.value, version: version.value, updatedAt: "",
   };
   try {
-    let result: Draft;
-    const task = api.saveDraft(key, draft);
-    savePromise = task.then(() => {}).catch(() => {});
-    result = await task;
+    const result = await api.saveDraft(key, draft);
     version.value = result.version;
-    saveState.value = isMock ? "已保存" : "已同步到服务器";
+    saveState.value = platform?.live || !isMock ? "已同步到服务器" : "已保存";
+    draftStore.removeItem("codelab-unsynced-" + key);
+    return true;
   } catch (e) {
     saveState.value = (e as Error).message;
     if (e instanceof ApiError && e.status === 409) conflict.value = true;
-    try {
-      localStorage.setItem("codelab-unsynced-" + key, JSON.stringify(draft));
-    } catch {
-      ElMessage.error("本地存储已满，请立即下载草稿");
-    }
-  } finally {
-    saving = false;
-    savePromise = null;
+    try { draftStore.setItem("codelab-unsynced-" + key, JSON.stringify(draft)); }
+    catch { ElMessage.error("本地存储已满，请立即下载草稿"); }
+    return false;
   }
-  if (
-    !sameFiles(draft.files, files.value) ||
-    draft.explanation !== explanation.value
-  ) {
-    clearTimeout(saveTimer);
-    saveTimer = setTimeout(save, 100);
+}
+async function save(): Promise<boolean> {
+  if (savePromise && !(await savePromise)) return false;
+  if (frozen.value || conflict.value || offline.value) return false;
+  if (!savePromise) {
+    savePromise = saveDraft().finally(() => { savePromise = null; });
+  }
+  return savePromise;
+}
+async function saveCurrent(): Promise<boolean> {
+  // Drain edits made while the preceding revision was being acknowledged.
+  for (;;) {
+    const before = JSON.stringify([files.value, explanation.value, chat.value, file.value]);
+    if (!await save()) return false;
+    if (before === JSON.stringify([files.value, explanation.value, chat.value, file.value])) return true;
   }
 }
 watch(
-  [files, explanation],
+  [files, explanation, chat],
   () => {
     if (frozen.value) return;
     saveState.value = "有未保存修改";
@@ -234,7 +220,7 @@ watch(
 );
 async function restore() {
   const d = JSON.parse(
-    localStorage.getItem("codelab-draft-" + key) || "null",
+    draftStore.getItem("codelab-draft-" + key) || "null",
   ) as Draft | null;
   if (d) {
     files.value = { ...upgradeDraft(d).files };
@@ -245,12 +231,40 @@ async function restore() {
     saveState.value = "已恢复确认版本";
   }
 }
-async function run() {
-  if (!problem.value || frozen.value) return;
-  running.value = true;
-  bottomTab.value = "项目检查";
+async function refreshHistory() {
+  bottomTab.value = "草稿历史";
+  if (!platform?.live) return;
+  try { historyRows.value = await platform.versions(key); }
+  catch (e) { ElMessage.error((e as Error).message); }
+}
+async function restoreVersion(target: number) {
+  if (!platform?.live || frozen.value) return;
   try {
-    const r = await api.run(problem.value.id, files.value);
+    await ElMessageBox.confirm("当前内容会先保存，恢复后仍可在历史中找到。", "恢复草稿版本");
+  } catch { return; }
+  if (!await saveCurrent()) return ElMessage.warning("当前内容尚未保存，无法恢复。");
+  try {
+    const restored = await platform.restoreDraft(key, target, version.value);
+    files.value = { ...restored.files }; file.value = restored.activeFile;
+    explanation.value = restored.explanation; version.value = restored.version;
+    chat.value = restored.aiHistory || [];
+    await refreshHistory();
+  } catch (e) { ElMessage.error((e as Error).message); }
+}
+async function stopJob(task: JobProgress | null) {
+  if (!task || !platform?.live) return;
+  try { await platform.cancelJob(task.id); }
+  catch (e) { ElMessage.error((e as Error).message); }
+}
+async function run(command = "", inSandbox = false) {
+  if (!problem.value || frozen.value || running.value) return;
+  running.value = true;
+  if (!inSandbox) bottomTab.value = "项目检查";
+  runTask.value = null;
+  try {
+    const r = platform?.live
+      ? await platform.runCommand(problem.value.id, files.value, command, task => { runTask.value = task; })
+      : await api.run(problem.value.id, files.value);
     output.value = r.message;
     runShown.value = true;
   } catch (e) {
@@ -261,68 +275,34 @@ async function run() {
   }
 }
 async function submit() {
-  if (!problem.value || frozen.value) return;
+  if (!problem.value || frozen.value || busy.value) return;
   if (!Object.values(files.value).some((text) => text.trim()))
     return ElMessage.warning("请先编写项目文件");
   busy.value = true;
   try {
-    await save();
+    if (!await saveCurrent()) return ElMessage.warning("草稿尚未同步，暂不能提交项目。");
+    const frozenFiles = { ...files.value };
+    const history = chat.value.map(({role, text}) => ({role, text}));
+    const retryStore = "codelab-submit-" + key;
+    const previous = JSON.parse(sessionStorage.getItem(retryStore) || "null");
+    const token = previous?.version === version.value ? previous.token : crypto.randomUUID();
+    sessionStorage.setItem(retryStore, JSON.stringify({version: version.value, token}));
     const s = await api.submit(
       problem.value.id,
-      files.value,
+      frozenFiles,
       explanation.value,
-      crypto.randomUUID(),
+      token,
       exam.value?.id,
-      chat.value,
+      history,
     );
+    sessionStorage.removeItem(retryStore);
     if (exam.value) {
       ElMessage.success(`过程提交 ${s.id} 已接收；最终成绩以交卷快照为准`);
-    } else router.push("/reports/" + s.id);
+    } else ElMessage.success("项目已提交，编号 " + s.id);
   } catch (e) {
     ElMessage.error((e as Error).message);
   } finally {
     busy.value = false;
-  }
-}
-async function ask() {
-  if (!message.value.trim() || aiBusy.value || !aiAllowed.value || frozen.value)
-    return;
-  const prompt = message.value;
-  message.value = "";
-  chat.value.push({
-    role: "user",
-    text: prompt,
-    time: new Date().toISOString(),
-  });
-  aiBusy.value = true;
-  try {
-    const r = await api.ai(
-      prompt,
-      files.value,
-      scope,
-      problem.value!.id,
-      file.value,
-    );
-    chat.value.push({
-      role: "assistant",
-      text: r.text,
-      time: new Date().toISOString(),
-      requestId: "REQ-" + Date.now(),
-    });
-    suggestion.value = r.suggestion;
-    suggestionFile.value = r.file;
-    const u = usage.value;
-    state.aiUsage[userId() + ":" + scope] = {
-      requests: u.requests + 1,
-      tokens: u.tokens + r.tokens,
-    };
-  } catch (e) {
-    chat.value.push({
-      role: "assistant",
-      text: "请求失败：" + (e as Error).message,
-    });
-  } finally {
-    aiBusy.value = false;
   }
 }
 async function handIn(auto = false) {
@@ -341,14 +321,7 @@ async function handIn(auto = false) {
     } catch {
       return;
     }
-    if (savePromise) await savePromise;
-    await save();
-    if (
-      conflict.value ||
-      offline.value ||
-      saveState.value.includes("失败") ||
-      saveState.value.includes("不足")
-    )
+    if (!await saveCurrent())
       return ElMessage.warning("草稿尚未同步，请处理冲突或恢复网络后交卷");
   }
   busy.value = true;
@@ -363,7 +336,7 @@ async function handIn(auto = false) {
       updatedAt: new Date().toISOString(),
     };
     for (const id of exam.value.problemIds) {
-      const raw = localStorage.getItem(
+      const raw = draftStore.getItem(
         "codelab-draft-" + userId() + ":" + scope + ":" + id,
       );
       if (raw && id !== problem.value!.id)
@@ -378,12 +351,10 @@ async function handIn(auto = false) {
     busy.value = false;
   }
 }
-onBeforeRouteLeave(async () => {
+async function beforeChange() {
   clearTimeout(saveTimer);
   if (!frozen.value) {
-    if (savePromise) await savePromise;
-    await save();
-    if (offline.value || conflict.value) {
+    if (!await saveCurrent()) {
       try {
         await ElMessageBox.confirm(
           "有尚未同步的草稿。建议先下载保留，是否仍要离开？",
@@ -394,7 +365,9 @@ onBeforeRouteLeave(async () => {
       }
     }
   }
-});
+}
+onBeforeRouteLeave(beforeChange);
+onBeforeRouteUpdate(beforeChange);
 function online() {
   offline.value = !navigator.onLine;
   if (!offline.value) save();
@@ -421,7 +394,7 @@ onMounted(() => {
   window.addEventListener("storage", storage);
   window.addEventListener("beforeunload", leave);
   if (!initial && !frozen.value) save();
-  const unsynced = localStorage.getItem("codelab-unsynced-" + key);
+  const unsynced = draftStore.getItem("codelab-unsynced-" + key);
   if (unsynced) ElMessage.warning("检测到未同步的本地草稿，可在下方下载保留。");
 });
 onBeforeUnmount(() => {
@@ -468,7 +441,7 @@ onBeforeUnmount(() => {
       <div>
         <span v-if="exam" class="countdown"
           ><Icon name="clock" :size="16" />{{ timeText }} </span
-        ><el-button :loading="running" :disabled="frozen" @click="run"
+        ><el-button :loading="running" :disabled="frozen" @click="run()"
           ><Icon name="play" :size="15" />检查项目</el-button
         ><el-button
           type="primary"
@@ -664,10 +637,10 @@ onBeforeUnmount(() => {
               <div class="results-panel">
                 <div class="work-tabs">
                   <button
-                    v-for="t in ['项目检查', '验证说明']"
+                    v-for="t in platform?.live ? ['项目检查', '验证说明', '草稿历史'] : ['项目检查', '验证说明']"
                     :key="t"
                     :class="{ active: bottomTab === t }"
-                    @click="bottomTab = t"
+                    @click="t === '草稿历史' ? refreshHistory() : bottomTab = t"
                   >
                     {{ t }}
                   </button>
@@ -678,10 +651,18 @@ onBeforeUnmount(() => {
                       >检查项目文件，查看测试命令</span
                     >
                   </div>
-                  <p v-else-if="running">正在请求运行服务…</p>
+                  <p v-else-if="running">正在请求运行服务…
+                    <button v-if="runTask" class="text-link" @click="stopJob(runTask)">停止运行</button>
+                  </p>
                   <template v-else>
                     <pre>{{ output }}</pre>
                   </template>
+                </div>
+                <div v-else-if="bottomTab === '草稿历史'" class="run-output">
+                  <p v-if="!historyRows.length">暂无已保存的版本</p>
+                  <p v-for="row in historyRows" :key="row.version">v{{ row.version }} · {{ new Date(row.updatedAt).toLocaleTimeString() }}
+                    <button class="text-link" v-if="row.version !== version" :disabled="frozen" @click="restoreVersion(row.version)">恢复此版本</button>
+                  </p>
                 </div>
                 <div v-else class="explanation-editor">
                   <el-input
@@ -695,126 +676,7 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </div></section></template
-      ><template #assistant>
-        <aside class="work-ai">
-          <div class="ai-header">
-            <span class="icon-tile"><Icon name="sparkles" :size="19" /></span>
-            <div>
-              <b>AI 编程助手</b
-              ><small>{{ exam?.model || "course-coder-v1" }}</small>
-            </div>
-            <span class="online-dot" />
-          </div>
-          <div class="ai-budget">
-            <div>
-              <span>本{{ exam ? "场" : "次" }}剩余额度</span
-              ><b
-                >{{ Math.max(0, (exam?.requests || 40) - usage.requests) }} /
-                {{ exam?.requests || 40 }} 次</b
-              >
-            </div>
-            <el-progress
-              :percentage="
-                Math.min(100, (usage.requests / (exam?.requests || 40)) * 100)
-              "
-              :show-text="false"
-              :stroke-width="4"
-            /><small
-              >Token {{ usage.tokens.toLocaleString() }} /
-              {{ (exam?.tokens || 60000).toLocaleString() }}</small
-            >
-          </div>
-          <div class="chat-body">
-            <div class="ai-intro" v-if="!chat.length">
-              <span class="ai-spark"><Icon name="sparkles" :size="26" /></span>
-
-              <button
-                v-for="q in [
-                  '阅读项目，梳理调用链与改动范围',
-                  '把验收标准转为测试计划',
-                  '审查当前文件的缺陷与副作用',
-                ]"
-                :key="q"
-                class="suggestion-prompt"
-                :disabled="frozen"
-                @click="
-                  message = q;
-                  ask();
-                "
-              >
-                {{ q }}<Icon name="arrow" :size="14" />
-              </button>
-            </div>
-            <div
-              v-for="(m, i) in chat"
-              :key="i"
-              class="chat-message"
-              :class="m.role"
-            >
-              <small>{{ m.role === "user" ? "你" : "AI 助手" }}</small>
-              <p>{{ m.text }}</p>
-              <details v-if="m.requestId" class="request-details">
-                <summary>调用详情</summary>
-                <span
-                  >{{ m.requestId }} · {{ exam?.model || "course-coder-v1" }} ·
-                  {{ m.time }}</span
-                >
-              </details>
-            </div>
-            <div v-if="aiBusy" class="muted tiny">正在生成回复…</div>
-            <el-button
-              v-if="suggestion"
-              :disabled="frozen"
-              size="small"
-              @click="showSuggestion = true"
-              >预览文件建议</el-button
-            >
-          </div>
-          <div class="chat-input">
-            <el-input
-              v-model="message"
-              type="textarea"
-              :rows="3"
-              :disabled="!aiAllowed || frozen"
-              :placeholder="
-                aiAllowed ? '描述你的问题…' : '额度已用尽，仍可继续独立作答'
-              "
-              @keydown.ctrl.enter="ask"
-            />
-            <div>
-              <span>Ctrl + Enter 发送</span
-              ><el-button
-                type="primary"
-                circle
-                :loading="aiBusy"
-                :disabled="!message.trim() || !aiAllowed || frozen"
-                aria-label="发送 AI 消息"
-                @click="ask"
-                ><Icon name="arrow" :size="16"
-              /></el-button>
-            </div>
-          </div></aside
-      ></template>
+      ><template #assistant><aside class="work-ai"><h3>本题交付要求</h3><ul><li v-for="item in problem.deliverables" :key="item">{{ item }}</li></ul></aside></template>
     </ResizableWorkspace>
-    <el-dialog v-model="showSuggestion" title="确认应用 AI 建议" width="650px"
-      ><p class="muted">
-        {{ suggestionFile }}
-      </p>
-      <pre class="code-preview">{{ suggestion }}</pre>
-      <template #footer
-        ><el-button @click="showSuggestion = false">取消</el-button
-        ><el-button
-          type="primary"
-          :disabled="frozen"
-          @click="
-            files[suggestionFile] = suggestion;
-            file = suggestionFile;
-            showSuggestion = false;
-            ElMessage.success('已应用建议');
-          "
-          >应用到 {{ suggestionFile }}</el-button
-        ></template
-      ></el-dialog
-    >
   </template>
 </template>
