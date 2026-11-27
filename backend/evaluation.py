@@ -10,13 +10,21 @@ from flask import Blueprint, g, request
 from . import capacity, model_client
 from .ai_settings import agent_max_steps
 from .core import audit, body, db, fail, files, ident, now, obj, ok, require, uid
+from . import grading
 from .sandbox import Interrupted, RunnerUnavailable, ServiceFault, TransientServiceFault, sandbox
 
 bp = Blueprint("evaluation", __name__)
 STATES = {"queued": "排队中", "running": "运行中", "done": "已完成", "failed": "SYSTEM_FAILED",
           "review": "PENDING_REVIEW", "cancelled": "已中止", "code_error": "运行错误"}
+# Windows releases can run side by side against the same database. Older workers
+# only claim queued/running, so they must never see v2 scoring jobs in those states.
+GRADE_QUEUED = "grade_v2_queued"
+GRADE_RUNNING = "grade_v2_running"
+PUBLIC_GRADE_STATES = {GRADE_QUEUED: "queued", GRADE_RUNNING: "running"}
+
+
 def public_job_state(state):
-    return state
+    return PUBLIC_GRADE_STATES.get(state, state)
 
 
 def init_db(conn):
@@ -60,13 +68,19 @@ def _log(job_id, event, detail=""):
 
 def _create(kind, user, exam_id, problem_id, payload, submission_id=None):
     jid, stamp = ident("JOB"), now()
-    state = "queued"
+    state = GRADE_QUEUED if kind == "grade" else "queued"
     db().execute("""INSERT INTO evaluation_jobs
         (id,kind,user_id,exam_id,problem_id,submission_id,payload,state,created,updated)
         VALUES(?,?,?,?,?,?,?,?,?,?)""",
         (jid, kind, user, exam_id, problem_id, submission_id, obj(payload), state, stamp, stamp))
     _log(jid, "已受理", kind)
     return jid
+
+
+def enqueue(submission_id):
+    row = db().execute("SELECT * FROM submissions WHERE id=?", (submission_id,)).fetchone()
+    return _create("grade", row["user_id"], row["exam_id"], row["problem_id"],
+                   {"rubric_version": grading.RUBRIC_VERSION}, submission_id)
 
 
 def _request_context(data):
