@@ -6,15 +6,25 @@ import {
   type PaneSizes,
 } from "../workspaceLayout";
 const grid = ref<HTMLElement>();
-const saved = JSON.parse(localStorage.getItem("codelab-pane-sizes") || "null");
+function readPaneSizes(): Partial<PaneSizes> | null {
+  try {
+    const value = JSON.parse(localStorage.getItem("codelab-pane-sizes") || "null");
+    return value && typeof value === "object" ? value : null;
+  } catch {
+    return null;
+  }
+}
+const saved = readPaneSizes();
 const sizes = ref<PaneSizes>(
   saved &&
+    typeof saved.statement === "number" &&
     Number.isFinite(saved.statement) &&
+    typeof saved.assistant === "number" &&
     Number.isFinite(saved.assistant) &&
     saved.statement > 0 &&
     saved.assistant > 0 &&
     saved.statement + saved.assistant < 100
-    ? saved
+    ? { statement: saved.statement, assistant: saved.assistant }
     : { ...defaultPaneSizes },
 );
 const dragging = ref<keyof PaneSizes | null>(null);
