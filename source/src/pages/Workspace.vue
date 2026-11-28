@@ -11,6 +11,7 @@ import {
 import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import Icon from "../components/Icon.vue";
+import ChatMarkdown from "../components/ChatMarkdown.vue";
 import AgentActivity, { summarizeAgentActivity, type AgentActivityRecord } from "../components/AgentActivity.vue";
 import ResizableWorkspace from "../components/ResizableWorkspace.vue";
 import ProjectExplorer from "../components/ProjectFiles.vue";
@@ -856,7 +857,8 @@ onBeforeUnmount(() => {
             >
               <small>{{ m.role === "user" ? "你" : "AI 助手" }}</small>
               <AgentActivity v-if="m.activity" :activity="m.activity" />
-              <p>{{ m.text }}</p>
+              <ChatMarkdown v-if="m.role === 'assistant' && m.text" :content="m.text" />
+              <p v-else-if="m.text">{{ m.text }}</p>
               <details v-if="m.requestId" class="request-details">
                 <summary>调用详情</summary>
                 <span
