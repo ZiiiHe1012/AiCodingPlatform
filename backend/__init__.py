@@ -13,7 +13,7 @@ from flask import Flask, g, jsonify, redirect, request, send_from_directory, url
 from werkzeug.exceptions import HTTPException
 from werkzeug.serving import run_simple
 
-from . import ai_settings, auth, catalog, evaluation, exams, workspaces, exam_sandboxes, frontend_bridge
+from . import ai_settings, assessments, auth, catalog, evaluation, exams, frontend_bridge, workspaces, exam_sandboxes
 from .core import db, fail, ident, ok
 from . import capacity
 
@@ -35,7 +35,7 @@ def background_tasks(app, workers, model_slots):
             if not worked:
                 stop.wait(interval)
 
-    actions = [(exam_sandboxes.maintain_one, .75)]
+    actions = [(exams.close_next_due, .75), (exam_sandboxes.maintain_one, .75)]
     actions.extend([(evaluation.work_once, .75)] * (workers + model_slots))
     threads = []
     try:
@@ -73,11 +73,11 @@ def create_app(config=None):
     with app.app_context():
         conn = db()
         conn.execute("PRAGMA journal_mode=WAL")
-        for module in (auth, catalog, exams, evaluation, ai_settings, exam_sandboxes):
+        for module in (auth, catalog, exams, assessments, evaluation, ai_settings, exam_sandboxes):
             module.init_db(conn)
         conn.commit()
 
-    for module in (auth, catalog, exams, evaluation, workspaces):
+    for module in (auth, catalog, exams, assessments, evaluation, workspaces):
         app.register_blueprint(module.bp, url_prefix="/api/v1")
 
     app.register_blueprint(ai_settings.bp)

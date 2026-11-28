@@ -198,6 +198,12 @@ async function down(p: BankProblem) {
                 >
                   {{ p.status === "已发布" ? "编辑新版本" : "编辑" }}</button
                 ><button
+                  v-else
+                  class="text-link"
+                  @click="router.push('/workspace/' + p.id)"
+                >
+                  查看题面</button
+                ><button
                   v-if="
                     p.status === '已发布' &&
                     (canEdit(p))

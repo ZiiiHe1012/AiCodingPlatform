@@ -57,7 +57,7 @@ const fileLabels: Record<string, string> = {
   css: "#",
 };
 function extension(path: string) {
-  return path.split(".").pop() || "";
+  return (path.split(".").pop() || "").toLowerCase();
 }
 </script>
 <template>

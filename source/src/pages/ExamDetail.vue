@@ -139,7 +139,7 @@ async function openWorkspace() {
           <h2>考前确认</h2>
           <div class="environment-check">
             <div><Icon name="success" />浏览器已就绪</div>
-            <div><Icon name="success" />已读取服务器考试规则</div>
+            <div><Icon name="success" />项目编辑器已就绪</div>
           </div>
 
           <template v-if="exam.receipt"
@@ -151,7 +151,7 @@ async function openWorkspace() {
             </div>
             <el-button
               class="full-width"
-              v-if="false"
+              @click="openWorkspace"
               >查看只读工作台</el-button
             ></template
           ><template v-else
@@ -161,7 +161,7 @@ async function openWorkspace() {
               type="primary"
               class="full-width"
               :disabled="!ready || loadingPaper"
-              v-if="false"
+              @click="openWorkspace"
               ><Icon name="arrow" :size="16" />进入考试</el-button
             >
             <p v-if="!inWindow" class="muted">当前不在考试时段</p></template

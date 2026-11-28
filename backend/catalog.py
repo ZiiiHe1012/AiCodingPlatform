@@ -257,8 +257,13 @@ def list_projects():
     ranked = sql.replace("SELECT v.*,", "SELECT ROW_NUMBER() OVER (PARTITION BY p.id ORDER BY v.seq DESC) rn, v.*,", 1)
     query = request.args
     page, size = pagination()
-    current_only = "SELECT NULL AS problem_id, 0 AS attempts, 0 AS solved, 0 AS passRate WHERE 0"
+    current_only = """SELECT problem_id,COUNT(*) attempts,
+                       MAX(CASE WHEN status='COMPLETED' THEN 1 ELSE 0 END) solved,
+                       AVG(CASE WHEN status='COMPLETED' THEN CASE WHEN json_extract(scores,'$[0]')=100 THEN 100.0 ELSE 0.0 END END) passRate
+                       FROM submissions WHERE user_id=? AND exam_id IS NULL AND kind='practice' GROUP BY problem_id"""
+    # The catalog never infers practice statistics from unpublished exam grades.
     filtered = " FROM (" + ranked + ") r LEFT JOIN (" + current_only + ") s ON s.problem_id=r.problem_id WHERE r.rn=1"
+    args.append(current)
     keyword = (query.get("q") or query.get("keyword") or "").strip()
     if keyword:
         filtered += """ AND (instr(lower(r.problem_id||json_extract(metadata,'$.title')||

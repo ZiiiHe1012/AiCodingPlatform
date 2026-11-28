@@ -207,6 +207,8 @@ def exams():
         rows = db().execute("""SELECT e.* FROM exams e WHERE (e.owner_id=? AND ?='teacher') OR ?='admin'
             OR EXISTS(SELECT 1 FROM participants p WHERE p.exam_id=e.id AND p.user_id=?) ORDER BY e.start DESC""",
                             (uid(), g.user["role"], g.user["role"], uid())).fetchall()
+        for row in rows:
+            close_if_due(row)
         return ok([exam_data(row, False) for row in rows])
     data = body()
     personal = request.path.endswith("/mock-exams") or data.get("personal") is True
@@ -230,6 +232,7 @@ def exams():
 def exam_detail(eid):
     if request.method == "GET":
         row = accessible(eid)
+        close_if_due(row)
         return ok(exam_data(row))
     lock()
     row = manage(eid)
@@ -299,6 +302,7 @@ def checkin(eid):
     row = accessible(eid)
     if not participant(row, uid()):
         fail(403, "当前账户不在考试名单")
+    close_if_due(row)
     client = string(body().get("client_id"), "页面标识", 120)
     locked = sheet_data(eid, uid()) or row["end"] <= now()
     if not locked:
@@ -464,3 +468,60 @@ def restore(key):
     if not old:
         fail(404, "版本不存在")
     return ok(write_draft(args, old, data.get("expected_version")))
+
+
+def freeze(row, user, auto):
+    from .assessments import record
+    existing = sheet_data(row["id"], user)
+    if existing:
+        return existing
+    drafts, submissions = {}, {}
+    for p in json.loads(row["snapshots"]):
+        if p["id"] in submissions:
+            continue  # Older exams could list the same question both with and without the version.
+        d = saved(user, row["id"], p["id"])
+        if d:
+            drafts[p["id"]] = d
+        if d and any(v.strip() for v in d["files"].values()) and (
+                d["files"] != p["files"] or d["explanation"].strip()):
+            submissions[p["id"]] = record(user, p, row["id"], "final", d, None, None)
+    receipt = {"receipt": ident("ANS"), "drafts": drafts, "submissions": submissions, "auto": auto, "createdAt": now()}
+    db().execute("INSERT INTO sheets VALUES(?,?,?,?,?)", (row["id"], user, receipt["receipt"], obj(receipt), receipt["createdAt"]))
+    exam_sandboxes.retire(row["id"], user)
+    if json.loads(row["config"])["personal"]:
+        db().execute("UPDATE exams SET published_at=COALESCE(published_at,?) WHERE id=?", (now(), row["id"]))
+    return receipt
+
+
+def close_if_due(row):
+    if (row["state"] == "published" and row["end"] <= now() and participant(row, uid())
+            and not sheet_data(row["id"], uid())):
+        lock()
+        freeze(row, uid(), True)
+
+
+def close_next_due():
+    row = db().execute("""SELECT e.*,p.user_id AS candidate FROM exams e JOIN participants p ON p.exam_id=e.id
+        WHERE e.state='published' AND e.end<=? AND NOT EXISTS(SELECT 1 FROM sheets s
+        WHERE s.exam_id=e.id AND s.user_id=p.user_id) ORDER BY e.end LIMIT 1""", (now(),)).fetchone()
+    if row:
+        lock()
+        freeze(row, row["candidate"], True)
+        db().commit()
+    return bool(row)
+
+
+@bp.route("/exams/<eid>/answer-sheet", methods=["GET", "POST"])
+def sheet(eid):
+    lock()
+    row = accessible(eid)
+    if not participant(row, uid()):
+        fail(403, "当前账户不在考试名单")
+    close_if_due(row)
+    existing = sheet_data(eid, uid())
+    if existing:
+        return ok(existing)
+    if request.method == "GET":
+        fail(404, "尚未交卷")
+    writer(row)
+    return ok(freeze(row, uid(), False), 201)
