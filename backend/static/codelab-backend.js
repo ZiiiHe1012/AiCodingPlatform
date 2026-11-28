@@ -174,9 +174,12 @@ export function connectBackend(api, state, ApiError) {
   for(const [name,handler] of Object.entries(remote)) {
     api[name]=(...args)=>profile||name==='login'||name==='register'?handler(...args):original[name](...args);
   }
+  const sandboxPath=(scope,pid)=>'/workspaces/'+encodeURIComponent(scope)+'/'+encodeURIComponent(pid);
   return {
     route, get live(){return !!profile;},
     get examReadOnly(){return !!activeExam && !session;},
+    workspace:(scope,pid)=>request(sandboxPath(scope,pid)),
+    preview:(scope,pid,version,actions)=>request(sandboxPath(scope,pid)+'/preview','POST',{version,actions}),
     versions:key=>request('/drafts/'+encodeURIComponent(key)+'/versions'),
     async restoreDraft(key,version,expected_version) {
       const draft=await request('/drafts/'+encodeURIComponent(key)+'/restore','POST',{version,expected_version});

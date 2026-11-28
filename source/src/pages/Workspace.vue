@@ -14,7 +14,8 @@ import Icon from "../components/Icon.vue";
 import ResizableWorkspace from "../components/ResizableWorkspace.vue";
 import ProjectExplorer from "../components/ProjectFiles.vue";
 import { state, userId } from "../store";
-import { platform, type JobProgress } from "../services/platform";
+import StudentSandbox from "../components/StudentSandbox.vue";
+import { platform, type JobProgress, type WorkspaceInfo } from "../services/platform";
 import { api, isMock, ApiError } from "../services/api";
 import { dimensionNames, validatePackagePath } from "../domain";
 import { downloadProject, upgradeDraft } from "../project";
@@ -41,6 +42,22 @@ const rawInitial = (
 const initial = rawInitial ? upgradeDraft(rawInitial) : null;
 const files = ref<ProjectFiles>({
   ...(initial?.files || problem.value?.files || {}),
+});
+const workspaceInfo = ref<WorkspaceInfo | null>(null);
+const sandboxOpen = ref(false);
+watch(sandboxOpen, (open, _, cleanup) => {
+  if (!open || !platform?.live || !problem.value) return;
+  const pid = problem.value.id;
+  let closed = false;
+  const refresh = async () => {
+    try {
+      const info = await platform!.workspace(scope, pid);
+      if (!closed) workspaceInfo.value = info;
+    } catch { /* The existing connection or lease notice remains visible. */ }
+  };
+  void refresh();
+  const timer = setInterval(refresh, 5000);
+  cleanup(() => { closed = true; clearInterval(timer); });
 });
 const historyRows = ref<{version:number; updatedAt:string}[]>([]);
 interface ChatMessage {
@@ -383,6 +400,10 @@ function leave(e: BeforeUnloadEvent) {
 }
 onMounted(() => {
   acquire();
+  if (platform?.live && problem.value) {
+    platform.workspace(scope, problem.value.id).then(info => { workspaceInfo.value = info; })
+      .catch(e => ElMessage.error(e.message));
+  }
   periodicSave = setInterval(save, 15000);
   heartbeat = setInterval(acquire, 3000);
   tick = setInterval(() => {
@@ -441,7 +462,7 @@ onBeforeUnmount(() => {
       <div>
         <span v-if="exam" class="countdown"
           ><Icon name="clock" :size="16" />{{ timeText }} </span
-        ><el-button :loading="running" :disabled="frozen" @click="run()"
+        ><el-button v-if="platform?.live" @click="sandboxOpen = true">个人沙箱</el-button><el-button :loading="running" :disabled="frozen" @click="run()"
           ><Icon name="play" :size="15" />检查项目</el-button
         ><el-button
           type="primary"
@@ -678,5 +699,11 @@ onBeforeUnmount(() => {
           </div></section></template
       ><template #assistant><aside class="work-ai"><h3>本题交付要求</h3><ul><li v-for="item in problem.deliverables" :key="item">{{ item }}</li></ul></aside></template>
     </ResizableWorkspace>
+    <el-dialog v-model="sandboxOpen" title="个人沙箱" width="min(94vw, 1060px)" top="5vh">
+      <StudentSandbox v-if="sandboxOpen" :scope="scope" :pid="problem.id" :info="workspaceInfo"
+        :version="version" :frozen="frozen" :save="saveCurrent" :test="problem.commands.test"
+        :running="running" :output="output" @run="cmd => run(cmd, true)" />
+      <template #footer><el-button @click="sandboxOpen = false">返回编辑器</el-button></template>
+    </el-dialog>
   </template>
 </template>
