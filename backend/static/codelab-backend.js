@@ -118,6 +118,8 @@ export function connectBackend(api, state, ApiError) {
         sessionStorage.removeItem('codelab-draft-'+key);
         sessionStorage.removeItem('codelab-chat-'+key);
       }
+      const usage=await request('/ai/usage?scope='+encodeURIComponent(scope));
+      state.aiUsage[profile.id+':'+scope]={requests:usage.requests,tokens:usage.tokens};
     }
     return profile;
   }
@@ -170,6 +172,8 @@ export function connectBackend(api, state, ApiError) {
       upsert(state.exams,await request('/exams/'+eid)); return sheet;
     },
     run:(pid,files)=>job('/runs',{problem_version_id:reference(pid,activeExam),exam_id:activeExam,files}),
+    ai:(message,files,scope,pid,active_file)=>job('/ai/messages',{message,files,scope,active_file,
+      problem_version_id:reference(pid,activeExam),exam_id:activeExam}),
   };
   for(const [name,handler] of Object.entries(remote)) {
     api[name]=(...args)=>profile||name==='login'||name==='register'?handler(...args):original[name](...args);
@@ -188,7 +192,10 @@ export function connectBackend(api, state, ApiError) {
     },
     runCommand:(pid,files,command,update)=>job('/runs',{problem_version_id:reference(pid,activeExam),
       exam_id:activeExam,files,command:command||undefined},update),
+    askProject:(pid,files,message,active_file,update)=>job('/ai/messages',{problem_version_id:reference(pid,activeExam),
+      exam_id:activeExam,files,message,active_file},update),
     cancelJob:id=>request('/jobs/'+encodeURIComponent(id)+'/cancel','POST',{}),
+    usage:scope=>request('/ai/usage?scope='+encodeURIComponent(scope)),
     async logout(){if(profile){await request('/auth/logout','POST',{});leave();}},
     async changePassword(old_password,new_password){await request('/users/me/password','POST',{old_password,new_password});leave();},
     async updateProfile(data){profile=await request('/users/me','PATCH',data);return profile;}

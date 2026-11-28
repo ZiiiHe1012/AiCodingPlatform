@@ -5,6 +5,13 @@ import { sameFiles } from "../project";
 import { signIn, registerAccount, type Profile } from "./accounts";
 export const isMock = import.meta.env.VITE_USE_MOCK === "true" || import.meta.env.MODE === "test";
 export const baseURL = import.meta.env.VITE_API_BASE_URL || "/api/v1";
+type AiReply = {
+  text: string;
+  suggestion: string;
+  file: string;
+  tokens: number;
+  changes?: ProjectFiles;
+};
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -229,7 +236,7 @@ export const api = {
     scope: string,
     problemId: string,
     activeFile: string,
-  ) {
+  ): Promise<AiReply> {
     const exam = state.exams.find((e) => e.id === scope);
     const problem =
       exam?.snapshots?.find((p) => p.id === problemId) ||
@@ -240,12 +247,7 @@ export const api = {
         ? { [activeFile]: files[activeFile] || "" }
         : files;
     if (!isMock)
-      return request<{
-        text: string;
-        suggestion: string;
-        file: string;
-        tokens: number;
-      }>("POST", "/ai/messages", {
+      return request<AiReply>("POST", "/ai/messages", {
         message,
         scope,
         problem_version_id: problem.id + "@" + problem.version,

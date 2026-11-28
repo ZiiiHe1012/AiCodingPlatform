@@ -26,7 +26,10 @@ interface PlatformClient {
   versions(key:string): Promise<{version:number; updatedAt:string}[]>;
   restoreDraft(key:string, version:number, expected:number): Promise<Draft>;
   runCommand(pid:string, files:ProjectFiles, command:string, update:UpdateJob): Promise<{message:string}>;
+  askProject(pid:string, files:ProjectFiles, message:string, file:string, update:UpdateJob):
+    Promise<{text:string; changes?:ProjectFiles; suggestion:string; file:string; tokens:number}>;
   cancelJob(id:string): Promise<unknown>;
+  usage(scope:string): Promise<{requests:number; tokens:number}>;
   readonly live: boolean;
   route(to: RouteLocationNormalized, local: Profile | null): Promise<Profile | null>;
   logout(): Promise<void>;

@@ -128,6 +128,7 @@ onBeforeUnmount(() => {
             @click="mobileNavOpen = false"
             ><Icon :name="item.icon" /><span>{{ item.text }}</span></RouterLink
           >
+          <a href="/settings/ai" class="nav-link"><Icon name="settings" /><span>AI 服务设置</span></a>
         </div>
       </nav>
       <div class="sidebar-bottom">

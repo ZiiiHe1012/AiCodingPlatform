@@ -11,13 +11,14 @@ import {
 import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import Icon from "../components/Icon.vue";
+import AgentActivity, { summarizeAgentActivity, type AgentActivityRecord } from "../components/AgentActivity.vue";
 import ResizableWorkspace from "../components/ResizableWorkspace.vue";
 import ProjectExplorer from "../components/ProjectFiles.vue";
 import { state, userId } from "../store";
 import StudentSandbox from "../components/StudentSandbox.vue";
 import { platform, type JobProgress, type WorkspaceInfo } from "../services/platform";
 import { api, isMock, ApiError } from "../services/api";
-import { dimensionNames, validatePackagePath } from "../domain";
+import { dimensionNames, canUseAI, validatePackagePath } from "../domain";
 import { downloadProject, upgradeDraft } from "../project";
 import type { Draft, ProjectFiles } from "../types";
 const CodeEditor = defineAsyncComponent(
@@ -65,8 +66,11 @@ interface ChatMessage {
   text: string;
   time?: string;
   requestId?: string;
+  activity?: AgentActivityRecord;
 }
-const runTask = ref<JobProgress | null>(null);
+const runTask = ref<JobProgress | null>(null), aiTask = ref<JobProgress | null>(null);
+const chatBody = ref<HTMLElement>();
+const suggestions = ref<{ path: string; content: string; original: string }[]>([]);
 const explanation = ref(initial?.explanation || ""),
   version = ref(initial?.version || 0),
   file = ref(initial?.activeFile || problem.value?.entryFile || "README.md"),
@@ -80,8 +84,36 @@ const explanation = ref(initial?.explanation || ""),
   running = ref(false),
   output = ref(""),
   runShown = ref(false),
+  message = ref(""),
+  aiBusy = ref(false),
+  showSuggestion = ref(false),
   chat = ref<ChatMessage[]>(JSON.parse(draftStore.getItem("codelab-chat-" + key) || "[]")),
   receipt = ref(exam.value?.receipt || "");
+const waitingForReply = computed(() => aiBusy.value && chat.value.at(-1)?.role === "user");
+const visibleChat = computed<ChatMessage[]>(() => {
+  if (!waitingForReply.value) return chat.value;
+  const task = aiTask.value;
+  return [...chat.value, {
+    role: "assistant", text: "",
+    activity: summarizeAgentActivity(task?.status || "pending", task?.events),
+  }];
+});
+
+// Keep the start of a long answer in view if the reader was following the live turn.
+function finishReply(text: string, status: "done" | "failed" | "cancelled") {
+  const body = chatBody.value;
+  const following = body && body.scrollHeight - body.scrollTop - body.clientHeight < 48;
+  const task = aiTask.value;
+  chat.value.push({
+    role: "assistant", text, time: new Date().toISOString(),
+    requestId: task?.id || (status === "done" ? "REQ-" + Date.now() : undefined),
+    activity: summarizeAgentActivity(status, task?.events),
+  });
+  if (following) void nextTick(() => {
+    const reply = body.querySelector<HTMLElement>(".chat-message:last-of-type");
+    if (reply) body.scrollTop += Math.max(0, reply.getBoundingClientRect().top - body.getBoundingClientRect().top - 10);
+  });
+}
 const explorerOpen = ref(true);
 const openedFiles = ref([file.value]);
 watch(file, (path) => {
@@ -174,6 +206,17 @@ function exportProject() {
     chat.value,
   );
 }
+const usage = computed(
+  () => state.aiUsage[userId() + ":" + scope] || { requests: 0, tokens: 0 },
+);
+const aiAllowed = computed(() =>
+  canUseAI(
+    usage.value.requests,
+    usage.value.tokens,
+    exam.value?.requests || 40,
+    exam.value?.tokens || 60000,
+  ),
+);
 watch(
   chat,
   () => draftStore.setItem("codelab-chat-" + key, JSON.stringify(chat.value)),
@@ -321,6 +364,64 @@ async function submit() {
   } finally {
     busy.value = false;
   }
+}
+async function ask() {
+  if (!message.value.trim() || aiBusy.value || !aiAllowed.value || frozen.value)
+    return;
+  const prompt = message.value;
+  const originalFiles = { ...files.value };
+  suggestions.value = [];
+  message.value = "";
+  chat.value.push({
+    role: "user",
+    text: prompt,
+    time: new Date().toISOString(),
+  });
+  aiBusy.value = true;
+  aiTask.value = null;
+  void nextTick(() => { if (chatBody.value) chatBody.value.scrollTop = chatBody.value.scrollHeight; });
+  try {
+    const r = platform?.live ? await platform.askProject(problem.value!.id, originalFiles, prompt, file.value,
+      task => { aiTask.value = task; }) : await api.ai(
+      prompt,
+      originalFiles,
+      scope,
+      problem.value!.id,
+      file.value,
+    );
+    finishReply(r.text, "done");
+    const changes = r.changes ?? (r.file && r.suggestion ? { [r.file]: r.suggestion } : {});
+    suggestions.value = Object.entries(changes).map(([path, content]) => ({
+      path, content, original: originalFiles[path],
+    }));
+    const u = usage.value;
+    state.aiUsage[userId() + ":" + scope] = {
+      requests: u.requests + 1,
+      tokens: u.tokens + r.tokens,
+    };
+  } catch (e) {
+    const stopped = (aiTask.value as JobProgress | null)?.status === "cancelled";
+    finishReply(stopped ? "本次回复已停止。" : "请求失败：" + (e as Error).message,
+      stopped ? "cancelled" : "failed");
+  } finally {
+    if (platform?.live) {
+      try { state.aiUsage[userId() + ":" + scope] = await platform.usage(scope); } catch { /* Refresh on next entry. */ }
+    }
+    aiBusy.value = false;
+  }
+}
+function applySuggestions() {
+  if (frozen.value || !suggestions.value.length) return;
+  const pending = suggestions.value;
+  showSuggestion.value = false;
+  suggestions.value = [];
+  if (pending.some(change => files.value[change.path] !== change.original)) {
+    ElMessage.warning("建议涉及的文件已被修改，请重新提问以保留最新代码");
+    return;
+  }
+  files.value = { ...files.value, ...Object.fromEntries(pending.map(change => [change.path, change.content])) };
+  file.value = pending[0].path;
+  ElMessage.success("已应用建议");
 }
 async function handIn(auto = false) {
   if (!exam.value || receipt.value || busy.value || readOnly.value) return;
@@ -697,7 +798,109 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </div></section></template
-      ><template #assistant><aside class="work-ai"><h3>本题交付要求</h3><ul><li v-for="item in problem.deliverables" :key="item">{{ item }}</li></ul></aside></template>
+      ><template #assistant>
+        <aside class="work-ai">
+          <div class="ai-header">
+            <span class="icon-tile"><Icon name="sparkles" :size="19" /></span>
+            <div>
+              <b>AI 编程助手</b
+              ><small>{{ exam?.model || workspaceInfo?.model || (platform?.live ? "未配置模型" : "course-coder-v1") }}</small>
+            </div>
+            <span class="online-dot" />
+          </div>
+          <div class="ai-budget">
+            <div>
+              <span>本{{ exam ? "场" : "次" }}剩余额度</span
+              ><b
+                >{{ Math.max(0, (exam?.requests || 40) - usage.requests) }} /
+                {{ exam?.requests || 40 }} 次</b
+              >
+            </div>
+            <el-progress
+              :percentage="
+                Math.min(100, (usage.requests / (exam?.requests || 40)) * 100)
+              "
+              :show-text="false"
+              :stroke-width="4"
+            /><small
+              >Token {{ usage.tokens.toLocaleString() }} /
+              {{ (exam?.tokens || 60000).toLocaleString() }}</small
+            >
+          </div>
+          <div ref="chatBody" class="chat-body">
+            <div class="ai-intro" v-if="!chat.length">
+              <span class="ai-spark"><Icon name="sparkles" :size="26" /></span>
+
+              <button
+                v-for="q in [
+                  '阅读项目，梳理调用链与改动范围',
+                  '把验收标准转为测试计划',
+                  '审查当前文件的缺陷与副作用',
+                ]"
+                :key="q"
+                class="suggestion-prompt"
+                :disabled="frozen"
+                @click="
+                  message = q;
+                  ask();
+                "
+              >
+                {{ q }}<Icon name="arrow" :size="14" />
+              </button>
+            </div>
+            <div
+              v-for="(m, i) in visibleChat"
+              :key="i"
+              class="chat-message"
+              :class="m.role"
+            >
+              <small>{{ m.role === "user" ? "你" : "AI 助手" }}</small>
+              <AgentActivity v-if="m.activity" :activity="m.activity" />
+              <p>{{ m.text }}</p>
+              <details v-if="m.requestId" class="request-details">
+                <summary>调用详情</summary>
+                <span
+                  >{{ m.requestId }} · {{ exam?.model || workspaceInfo?.model || (platform?.live ? "未配置模型" : "course-coder-v1") }} ·
+                  {{ m.time }}</span
+                >
+              </details>
+            </div>
+            <el-button
+              v-if="suggestions.length"
+              :disabled="frozen"
+              size="small"
+              @click="showSuggestion = true"
+              >预览文件建议</el-button
+            >
+          </div>
+          <div class="chat-input">
+            <el-input
+              v-model="message"
+              type="textarea"
+              :rows="3"
+              :disabled="!aiAllowed || frozen"
+              :placeholder="
+                aiAllowed ? '描述你的问题…' : '额度已用尽，仍可继续独立作答'
+              "
+              @keydown.ctrl.enter="ask"
+            />
+            <div>
+              <span>Ctrl + Enter 发送</span
+              ><button v-if="waitingForReply && aiTask" type="button" class="stop-reply"
+                aria-label="停止本次回复" title="停止本次回复" @click="stopJob(aiTask)">
+                <span aria-hidden="true"></span>
+              </button><el-button v-else
+                type="primary"
+                circle
+                :loading="aiBusy"
+                :disabled="!message.trim() || !aiAllowed || frozen"
+                aria-label="发送 AI 消息"
+                @click="ask"
+                ><Icon name="arrow" :size="16"
+              /></el-button>
+            </div>
+          </div></aside
+      ></template>
     </ResizableWorkspace>
     <el-dialog v-model="sandboxOpen" title="个人沙箱" width="min(94vw, 1060px)" top="5vh">
       <StudentSandbox v-if="sandboxOpen" :scope="scope" :pid="problem.id" :info="workspaceInfo"
@@ -705,5 +908,45 @@ onBeforeUnmount(() => {
         :running="running" :output="output" @run="cmd => run(cmd, true)" />
       <template #footer><el-button @click="sandboxOpen = false">返回编辑器</el-button></template>
     </el-dialog>
+    <el-dialog v-model="showSuggestion" title="确认应用 AI 建议" width="650px"
+      ><template v-for="change in suggestions" :key="change.path">
+        <p class="muted">{{ change.path }}</p>
+        <pre class="code-preview">{{ change.content || "（空文件）" }}</pre>
+      </template>
+      <template #footer
+        ><el-button @click="showSuggestion = false">取消</el-button
+        ><el-button
+          type="primary"
+          :disabled="frozen"
+          @click="applySuggestions"
+          >{{ suggestions.length === 1 ? '应用到 ' + suggestions[0].path : '应用到 ' + suggestions.length + ' 个文件' }}</el-button
+        ></template
+      ></el-dialog
+    >
   </template>
 </template>
+<style scoped>
+.chat-message.assistant {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.chat-message > small {
+  display: block;
+  margin-bottom: 4px;
+}
+.chat-message .request-details { margin-top: 10px; font-size: 11px; }
+.chat-input .stop-reply {
+  display: inline-grid;
+  place-items: center;
+  width: 27px;
+  height: 27px;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  color: white;
+  background: #315bc5;
+  cursor: pointer;
+}
+.stop-reply span { width: 9px; height: 9px; border-radius: 2px; background: currentColor; }
+.stop-reply:focus-visible { outline: 2px solid #315bc5; outline-offset: 3px; }
+</style>

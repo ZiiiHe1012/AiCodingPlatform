@@ -5,6 +5,7 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": "http://127.0.0.1:4173",
+      "/settings/ai": "http://127.0.0.1:4173",
       "/assets/codelab-backend.js": "http://127.0.0.1:4173",
     },
   },
